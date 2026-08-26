@@ -5,11 +5,21 @@ rem  海外人名条批量生成 - 启动器
 rem  双击此文件打开界面
 rem ====================================================
 set "SCRIPT_DIR=%~dp0"
-set "PYW=%SCRIPT_DIR%..\.venv\Scripts\pythonw.exe"
+set "PYW=pythonw.exe"
 
-if not exist "%PYW%" (
-    echo 未找到 pythonw.exe, 请确认 venv 存在: %PYW%
-    pause
+rem 优先使用本目录 venv（若存在），否则用系统 pythonw
+if exist "%SCRIPT_DIR%\.venv\Scripts\pythonw.exe" (
+    set "PYW=%SCRIPT_DIR%\.venv\Scripts\pythonw.exe"
+)
+
+rem 检查依赖是否已安装
+"%PYW%" -c "import uiautomation, tkinter" >nul 2>&1
+if errorlevel 1 (
+    echo [提示] 首次运行需要安装依赖: uiautomation
+    echo 请在命令行运行:  pip install -r "%SCRIPT_DIR%requirements.txt"
+    echo.
+    echo 按任意键退出...
+    pause >nul
     exit /b 1
 )
 

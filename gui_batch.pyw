@@ -12,6 +12,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 from src.pyJianYingDraft.jianying_controller import JianyingController, AutomationError
 
 user32 = ctypes.windll.user32
+
+# ------------------------------------------------------------------ 时间配置 (可调)
+# 固定等待时间均在此集中配置, 调快/调稳只需改这里。单位: 秒。
+# 注意: 渲染等待(wait_for_export_completion)由剪映导出速度决定, 此处无法加速。
+T_AFTER_EXPORT_KEY = 2.0      # Ctrl+M 后等剪映打开导出窗口
+T_AFTER_ENTER = 0.5           # 回车确认导出后
+T_BETWEEN_NAMES = 1.2         # 两个名字之间的间隔
+T_CLICK_TEXTBOX = 0.25        # 点击文本框后
+T_PASTE_WAIT = 0.35           # Ctrl+V 粘贴后
+T_CLIPBOARD = 0.15            # 写剪贴板后
 DEFAULT_OUTDIR = os.path.join(os.path.expanduser(r'~\Desktop'), '海外人名条')
 
 # ------------------------------------------------------------------ 核心逻辑
@@ -19,7 +29,7 @@ def set_clipboard(text):
     """写入系统剪贴板 (真实键盘粘贴用)"""
     import subprocess
     subprocess.run(['clip'], input=text.encode('utf-16le'), shell=True, check=True)
-    time.sleep(0.2)
+    time.sleep(T_CLIPBOARD)
 
 def key(vk):
     user32.keybd_event(vk, 0, 0, 0); user32.keybd_event(vk, 0, 2, 0)
@@ -86,7 +96,7 @@ class BatchRunner:
                     w = 0
                 if cy < 900 and w >= 80:
                     return (v, cx, cy, c)
-            time.sleep(1)
+            time.sleep(0.5)
         return None
 
     def set_name(self, name, edit_ctrl):
@@ -101,12 +111,12 @@ class BatchRunner:
             self._log(f'  取文本框坐标失败:{ex}')
             return False
         # 真实键盘输入
-        click(cx, cy); time.sleep(0.4)
-        ctrl_key(0x41); time.sleep(0.3)   # Ctrl+A 全选
-        key(0x2E); time.sleep(0.2)         # Delete 删除
+        click(cx, cy); time.sleep(T_CLICK_TEXTBOX)
+        ctrl_key(0x41); time.sleep(0.25)   # Ctrl+A 全选
+        key(0x2E); time.sleep(0.15)         # Delete 删除
         set_clipboard(name)
-        ctrl_key(0x56); time.sleep(0.4)    # Ctrl+V 粘贴
-        time.sleep(0.5)
+        ctrl_key(0x56); time.sleep(T_PASTE_WAIT)   # Ctrl+V 粘贴
+        time.sleep(0.3)
         # 重试读回验证: UIA树可能刷新, 需重新定位文本框
         for _ in range(5):
             tb = self.get_textbox(3)
@@ -126,7 +136,7 @@ class BatchRunner:
             cur = set(self.desktop_exports())
             new = cur - before_set
             if new: return list(new)[0]
-            time.sleep(1)
+            time.sleep(0.5)
         return None
 
     # ---- 单名字处理, 返回 True=成功
@@ -153,9 +163,9 @@ class BatchRunner:
         self._log(f'  已替换并确认: {name!r}')
 
         # 导出
-        ctrl_key(0x4D); time.sleep(3.0)
+        ctrl_key(0x4D); time.sleep(T_AFTER_EXPORT_KEY)
         self._log('  已按Ctrl+M')
-        key(0x0D); time.sleep(1.0)
+        key(0x0D); time.sleep(T_AFTER_ENTER)
         self._log('  已按回车')
 
         # 等待导出完成并自动关闭 (minimize=False: 保持窗口在前台, 不最小化)
@@ -204,7 +214,7 @@ class BatchRunner:
             ok = self.process_one(name, before_set)
             results[name] = ok
             self.progress_cb(idx, len(names), name, 'ok' if ok else 'fail')
-            time.sleep(2)
+            time.sleep(T_BETWEEN_NAMES)
 
         ok_names = [n for n, v in results.items() if v]
         fail_names = [n for n, v in results.items() if not v]
