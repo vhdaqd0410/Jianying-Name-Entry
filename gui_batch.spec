@@ -8,7 +8,7 @@ a = Analysis(
     ['gui_batch.pyw'],
     pathex=['.'],
     binaries=[],
-    datas=[],
+    datas=[('icon.ico', '.')],
     hiddenimports=['uiautomation', 'comtypes'],
     hookspath=[],
     runtime_hooks=[],
@@ -32,6 +32,7 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
+    icon='icon.ico',
     version='version_info.txt',
     disable_windowed_traceback=False,
 )
