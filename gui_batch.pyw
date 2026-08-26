@@ -16,7 +16,7 @@ user32 = ctypes.windll.user32
 # ------------------------------------------------------------------ 时间配置 (可调)
 # 固定等待时间均在此集中配置, 调快/调稳只需改这里。单位: 秒。
 # 注意: 渲染等待(wait_for_export_completion)由剪映导出速度决定, 此处无法加速。
-T_AFTER_EXPORT_KEY = 2.0      # Ctrl+M 后等剪映打开导出窗口
+T_AFTER_EXPORT_KEY = 0.3      # Ctrl+M 后 (用户实测可直接接回车)
 T_AFTER_ENTER = 0.5           # 回车确认导出后
 T_BETWEEN_NAMES = 1.2         # 两个名字之间的间隔
 T_CLICK_TEXTBOX = 0.25        # 点击文本框后
@@ -139,6 +139,23 @@ class BatchRunner:
             time.sleep(0.5)
         return None
 
+    def _wait_file_stable(self, path, timeout=15):
+        """等文件写入完成(大小稳定): 连续两次读取大小一致即视为写完。
+        避免剪映还在写/占用时 move 导致等待或失败。"""
+        last_size = -1
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                cur_size = os.path.getsize(path)
+            except OSError:
+                return  # 文件暂时不可读, 让后续move自己处理
+            if cur_size == last_size:
+                return  # 大小已稳定, 视为写完
+            last_size = cur_size
+            time.sleep(0.3)
+        # 超时也返回, 让move尝试
+        return
+
     # ---- 单名字处理, 返回 True=成功
     def process_one(self, name, before_set):
         self._log(f'\n=== {name} ===')
@@ -187,12 +204,15 @@ class BatchRunner:
             self._log('  文件未生成'); return False
         self._log(f'  文件: {os.path.basename(src)}')
 
+        # 等文件写入完成(大小稳定)后再移动, 避免剪映还在写导致等待
+        self._wait_file_stable(src, timeout=15)
+
         # 移动归置 (文件名与名字一致)
         target = os.path.join(self.outdir, name + '.mp4')
         if os.path.exists(target):
             target = os.path.join(self.outdir, name + '(1).mp4')
         try:
-            shutil.move(src, target)
+            os.replace(src, target)  # 同盘原子操作, 比shutil.move更快更稳
             self._log(f'  -> {target}')
             before_set.discard(src)
             return True
