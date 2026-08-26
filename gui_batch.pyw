@@ -330,8 +330,8 @@ class App:
             root.iconbitmap(resource_path('icon.ico'))
         except Exception:
             pass
-        root.geometry('640x720')
-        root.minsize(600, 680)
+        root.geometry('640x800')
+        root.minsize(600, 620)
         root.resizable(True, True)
         self._setup_theme(root)
 
@@ -377,10 +377,10 @@ class App:
 
         # ============ 卡片① 剪映连接 ============
         card1 = ttk.Labelframe(root, text='剪映连接', style='Card.TLabelframe')
-        card1.pack(fill='x', padx=12, pady=(8,0))
+        card1.pack(fill='x', padx=12, pady=(6,0))
 
         # 链接状态 + 启动按钮
-        link_row = ttk.Frame(card1); link_row.pack(fill='x', padx=12, pady=(10,4))
+        link_row = ttk.Frame(card1); link_row.pack(fill='x', padx=12, pady=(8,3))
         ttk.Label(link_row, text='状态').pack(side='left')
         self.link_canvas = tk.Canvas(link_row, width=18, height=18, bg='#ffffff', highlightthickness=0)
         self.link_canvas.pack(side='left', padx=(6,4))
@@ -392,8 +392,8 @@ class App:
         ttk.Button(link_row, text='帮助', command=self.show_help).pack(side='right')
 
         # 剪映路径
-        ttk.Label(card1, text='剪映程序路径 (用于启动剪映; 不填则自动探测)').pack(anchor='w', padx=12, pady=(4,2))
-        jy_row = ttk.Frame(card1); jy_row.pack(fill='x', padx=12, pady=(0,4))
+        ttk.Label(card1, text='剪映程序路径 (用于启动剪映; 不填则自动探测)').pack(anchor='w', padx=12, pady=(3,2))
+        jy_row = ttk.Frame(card1); jy_row.pack(fill='x', padx=12, pady=(0,3))
         self.jy_path_var = tk.StringVar()
         ttk.Entry(jy_row, textvariable=self.jy_path_var).pack(side='left', fill='x', expand=True, padx=(0,5))
         ttk.Button(jy_row, text='浏览', command=self.pick_jianying).pack(side='left', padx=(0,3))
@@ -401,8 +401,8 @@ class App:
         ttk.Button(jy_row, text='启动剪映', command=self.launch_jianying).pack(side='left')
 
         # 草稿名自动打开
-        ttk.Label(card1, text='草稿名 (留空跳过; 用于自动打开草稿并选中字幕条)').pack(anchor='w', padx=12, pady=(4,2))
-        drow = ttk.Frame(card1); drow.pack(fill='x', padx=12, pady=(0,4))
+        ttk.Label(card1, text='草稿名 (留空跳过; 用于自动打开草稿并选中字幕条)').pack(anchor='w', padx=12, pady=(3,2))
+        drow = ttk.Frame(card1); drow.pack(fill='x', padx=12, pady=(0,3))
         self.draft_var = tk.StringVar()
         self.draft_history = self._load_history()
         self.draft_combo = ttk.Combobox(drow, textvariable=self.draft_var, values=self.draft_history, width=20)
@@ -411,11 +411,13 @@ class App:
         ttk.Button(drow, text='打开草稿并选字幕', command=self.open_draft).pack(side='left')
         # 勾选后: 打开草稿成功即自动开始批量
         self.auto_run_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(card1, text='打开草稿并选中后自动开始批量任务', variable=self.auto_run_var).pack(anchor='w', padx=12, pady=(2,10))
+        tk.Checkbutton(card1, text='打开草稿并选中后自动开始批量任务', variable=self.auto_run_var,
+                       bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
+                       font=('Microsoft YaHei', 9)).pack(anchor='w', padx=12, pady=(0,8))
 
         # ============ 卡片② 名字列表 ============
         card2 = ttk.Labelframe(root, text='名字列表', style='Card.TLabelframe')
-        card2.pack(fill='x', padx=12, pady=(10,0))
+        card2.pack(fill='x', padx=12, pady=(8,0))
         btns = ttk.Frame(card2); btns.pack(anchor='w', padx=12, pady=(10,2))
         ttk.Button(btns, text='从CSV导入', command=self.load_csv).pack(side='left', padx=(0,5))
         ttk.Button(btns, text='从TXT导入', command=self.load_txt).pack(side='left', padx=(0,5))
@@ -423,22 +425,22 @@ class App:
         ttk.Button(btns, text='清空', command=self.clear_names).pack(side='left')
         ttk.Label(btns, text='每行一个名字', foreground='#888888').pack(side='right')
 
-        self.name_box = tk.Text(card2, height=8, font=('Consolas', 10), bg='#ffffff', relief='solid', bd=1)
+        self.name_box = tk.Text(card2, height=5, font=('Consolas', 10), bg='#ffffff', relief='solid', bd=1)
         self.name_box.pack(fill='x', padx=12, pady=(0,10))
 
         # ============ 卡片③ 输出与导出 ============
         card3 = ttk.Labelframe(root, text='输出与导出', style='Card.TLabelframe')
-        card3.pack(fill='x', padx=12, pady=(10,0))
+        card3.pack(fill='x', padx=12, pady=(8,0))
 
         # 输出目录
-        ttk.Label(card3, text='输出目录 (成片保存位置)').pack(anchor='w', padx=12, pady=(10,2))
+        ttk.Label(card3, text='输出目录 (成片保存位置)').pack(anchor='w', padx=12, pady=(8,2))
         row = ttk.Frame(card3); row.pack(fill='x', padx=12)
         self.outdir_var = tk.StringVar(value=DEFAULT_OUTDIR)
         ttk.Entry(row, textvariable=self.outdir_var).pack(side='left', fill='x', expand=True, padx=(0,5))
         ttk.Button(row, text='浏览', command=self.pick_dir).pack(side='left')
 
         # 导出设置
-        set_row = ttk.Frame(card3); set_row.pack(fill='x', padx=12, pady=8)
+        set_row = ttk.Frame(card3); set_row.pack(fill='x', padx=12, pady=6)
         ttk.Label(set_row, text='分辨率').pack(side='left')
         self.res_var = tk.StringVar(value='不修改')
         ttk.Combobox(set_row, textvariable=self.res_var, values=['不修改','1080P','720P','4K'], width=8).pack(side='left', padx=(3,14))
@@ -447,10 +449,12 @@ class App:
         ttk.Combobox(set_row, textvariable=self.fps_var, values=['不修改','25','30','60'], width=8).pack(side='left', padx=(3,0))
         # 完成后自动打开成品目录
         self.open_dir_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(set_row, text='完成后打开目录', variable=self.open_dir_var).pack(side='left', padx=14)
+        tk.Checkbutton(set_row, text='完成后打开目录', variable=self.open_dir_var,
+                       bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
+                       font=('Microsoft YaHei', 9)).pack(side='left', padx=14)
 
         # ============ 控制按钮 ============
-        ctl = ttk.Frame(root); ctl.pack(fill='x', padx=12, pady=(12,0))
+        ctl = ttk.Frame(root); ctl.pack(fill='x', padx=12, pady=(8,0))
         self.start_btn = ttk.Button(ctl, text='▶ 开始批量', command=self.start, style='Start.TButton')
         self.start_btn.pack(side='left')
         self.stop_btn = ttk.Button(ctl, text='■ 停止', command=self.stop, state='disabled', style='Stop.TButton')
@@ -459,7 +463,7 @@ class App:
         ttk.Label(ctl, textvariable=self.prog_var, font=('Microsoft YaHei', 9)).pack(side='left', padx=10)
 
         # ============ 进度条 ============
-        pbar_wrap = ttk.Frame(root); pbar_wrap.pack(fill='x', padx=12, pady=(10,0))
+        pbar_wrap = ttk.Frame(root); pbar_wrap.pack(fill='x', padx=12, pady=(8,0))
         self.pbar = ttk.Progressbar(pbar_wrap, mode='determinate',
                                     style='Highlight.Horizontal.TProgressbar')
         self.pbar.pack(fill='x')
@@ -474,10 +478,10 @@ class App:
 
         # ============ 日志 ============
         log_card = ttk.Labelframe(root, text='日志', style='Card.TLabelframe')
-        log_card.pack(fill='both', expand=True, padx=12, pady=(10,0))
-        self.log_box = tk.Text(log_card, height=10, font=('Consolas', 9), state='disabled',
+        log_card.pack(fill='both', expand=True, padx=12, pady=(8,0))
+        self.log_box = tk.Text(log_card, height=6, font=('Consolas', 9), state='disabled',
                                bg='#ffffff', relief='solid', bd=1, wrap='word')
-        self.log_box.pack(fill='both', expand=True, padx=10, pady=10)
+        self.log_box.pack(fill='both', expand=True, padx=10, pady=8)
         self._runner = None
         self._thread = None
 
