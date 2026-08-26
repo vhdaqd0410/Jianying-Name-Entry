@@ -468,7 +468,7 @@ class App:
         ttk.Label(ctl, textvariable=self.prog_var, font=('Microsoft YaHei', 9)).pack(side='left', padx=10)
 
         # ============ 进度条 ============
-        pbar_wrap = ttk.Frame(left); pbar_wrap.pack(fill='x', padx=0, pady=(8,0))
+        pbar_wrap = ttk.Frame(left); pbar_wrap.pack(side='bottom', fill='x', padx=0, pady=(8,0))
         self.pbar = ttk.Progressbar(pbar_wrap, mode='determinate',
                                     style='Highlight.Horizontal.TProgressbar')
         self.pbar.pack(fill='x')
@@ -973,7 +973,6 @@ def startup_check(root, app):
         return True
     # 剪映未连接(超时或失败): 不阻塞, 提示用户自行启动
     app._log('⚠ 未检测到剪映(或连接超时)。请用顶部\'启动剪映\'按钮启动, 或手动打开剪映。')
-    app.prog_var.set('剪映未连接')
     return True
 
 
