@@ -60,6 +60,36 @@ def detect_jianying_path():
             return p
     return ''
 
+def connect_jianying_timeout(activate: bool = True, timeout: float = 5.0):
+    """带硬超时的剪映连接。
+
+    剪映未运行时 UIA 窗口查找可能无限挂起, 若在主线程直接调用会卡死界面。
+    此函数把 JianyingController 放到后台线程执行, 主线程最多等 timeout 秒。
+
+    返回:
+        JianyingController 实例 (连接成功) 或 None (超时/连接失败)
+    """
+    holder = {}
+    def worker():
+        # 后台线程需自行初始化 COM, 否则 UIA 报 CoInitialize 错误
+        try:
+            ctypes.oledll.ole32.CoInitialize(None)
+        except Exception:
+            pass
+        try:
+            holder['ctrl'] = JianyingController(activate=activate)
+        except Exception as exc:
+            holder['err'] = exc
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        # 超时: 后台线程仍在尝试(daemon, 不影响退出), 视为未连接
+        return None
+    if 'ctrl' in holder:
+        return holder['ctrl']
+    return None
+
 # ------------------------------------------------------------------ 核心逻辑
 def set_clipboard(text):
     """写入系统剪贴板 (真实键盘粘贴用)"""
@@ -605,7 +635,7 @@ class App:
         self._start_run(names, self.outdir_var.get().strip() or DEFAULT_OUTDIR)
 
     def _start_run(self, names, outdir):
-        """启动批量任务(供按钮与自动执行共用)"""
+        """启动批量任务(供按钮与自动执行共用)。连接剪映放后台线程, 避免卡界面"""
         if not names:
             return
         self._log(f'输出目录: {outdir}')
@@ -613,14 +643,21 @@ class App:
         self.start_btn.config(state='disabled'); self.stop_btn.config(state='normal')
         self.pbar.config(maximum=len(names), value=0)
         self.prog_var.set('启动中...')
-        self._runner = BatchRunner(JianyingController(), outdir,
-                                   log_cb=self._log,
-                                   progress_cb=self._on_progress)
+        self._outdir = outdir
         self._thread = threading.Thread(target=self._run_worker, args=(names,), daemon=True)
         self._thread.start()
 
     def _run_worker(self, names):
         try:
+            # 后台线程连接剪映(带超时, 避免UIA挂起)
+            ctrl = connect_jianying_timeout(activate=True, timeout=6)
+            if ctrl is None:
+                self._log('✘ 未连接剪映(超时)。请用顶部"启动剪映"按钮启动后再试。')
+                self.root.after(0, lambda: self._finish(None, names))
+                return
+            self._runner = BatchRunner(ctrl, self._outdir,
+                                       log_cb=self._log,
+                                       progress_cb=self._on_progress)
             results = self._runner.run(names)
         except Exception as ex:
             self._log(f'致命错误: {ex}')
@@ -735,66 +772,28 @@ class App:
         except Exception: pass
 
 
-def startup_check(root):
-    """启动时: 检测剪映是否可连; 不可连时用配置路径拉起剪映"""
+def startup_check(root, app):
+    """启动时检测剪映是否可连(带超时, 不阻塞界面)。
+
+    剪映未运行时 UIA 查找可能挂起, 故用后台线程+超时检测,
+    无论结果如何都放行进入主界面, 由用户用顶部'启动剪映'按钮控制。"""
     root.update()
     root.deiconify()
-    # 检测剪映是否可连
-    try:
-        JianyingController()
+    ctrl = connect_jianying_timeout(activate=True, timeout=4)
+    if ctrl is not None:
+        app._log('✔ 剪映已连接, 可以开始使用')
         return True
-    except Exception:
-        pass
-    # 剪映未运行/未连上, 尝试用配置路径启动
-    path = ''
-    try:
-        import json
-        if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, encoding='utf-8') as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                path = data.get('jianying_path', '') or ''
-    except Exception:
-        path = ''
-    if not path or not os.path.isfile(path):
-        path = detect_jianying_path()
-    if path and os.path.isfile(path):
-        ok = messagebox.askyesno(
-            "启动剪映",
-            f"检测到剪映未运行或未在前台。\n\n是否用以下路径启动剪映？\n{path}",
-        )
-        if ok:
-            try:
-                os.startfile(path)
-            except Exception as ex:
-                messagebox.showerror("启动失败", str(ex))
-                return False
-            # 等剪映起来
-            for _ in range(15):
-                time.sleep(1)
-                try:
-                    JianyingController()
-                    return True
-                except Exception:
-                    pass
-            messagebox.showerror("剪映未连接", "剪映启动后未能连接, 请确认后重试。")
-            return False
-        return False
-    else:
-        messagebox.showerror(
-            "剪映未连接",
-            "无法连接剪映专业版。\n\n请在界面顶部设置剪映路径后点'启动剪映',\n或手动打开剪映后再启动本工具。",
-        )
-        return False
+    # 剪映未连接(超时或失败): 不阻塞, 提示用户自行启动
+    app._log('⚠ 未检测到剪映(或连接超时)。请用顶部\'启动剪映\'按钮启动, 或手动打开剪映。')
+    app.prog_var.set('剪映未连接')
+    return True
 
 
 def main():
     root = tk.Tk()
     app = App(root)
-    # 启动前提示：打开草稿并选中字幕条
-    if not startup_check(root):
-        root.destroy()
-        return
+    # 启动检测(非阻塞): 检测剪映是否可连
+    startup_check(root, app)
     app._log("就绪：请在剪映中保持已选中的字幕条")
     root.mainloop()
 
