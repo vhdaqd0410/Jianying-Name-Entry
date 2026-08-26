@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# 海外人名条批量生成 · 1.0 稳定版 打包配置
+# 海外人名条批量生成 · v1.0.5 · onefile 单文件打包配置(嵌入 icon.ico)
 import os
 
 name = '海外人名条批量生成'
@@ -9,7 +9,7 @@ a = Analysis(
     pathex=['.'],
     binaries=[],
     datas=[('icon.ico', '.')],
-    hiddenimports=['uiautomation', 'comtypes'],
+    hiddenimports=['uiautomation', 'comtypes', 'src.pyJianYingDraft.jianying_controller'],
     hookspath=[],
     runtime_hooks=[],
     excludes=['numpy', 'pandas', 'matplotlib', 'PIL'],
@@ -28,7 +28,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,

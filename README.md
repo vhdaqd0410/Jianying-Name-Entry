@@ -12,7 +12,16 @@
 - **名字来源**：手动输入 / CSV 导入（自动识别英文名列）/ TXT 导入 / 粘贴
 - **断点续跑**：单个名字失败自动跳到下一个，结束汇总成功/失败名单
 
-## 运行环境
+## 快速使用（单文件 exe）
+
+> 不想装 Python 环境的话，直接下载打包好的**单文件 exe** 即可运行，双击即用、自带图标。
+
+1. 到本仓库的 [Releases](https://github.com/vhdaqd0410/Jianying-Name-Entry/releases) 页面下载最新版本的 `海外人名条批量生成.exe`
+2. 双击运行
+3. 打开剪映专业版，进入你的草稿项目，选中字幕条
+4. 输入/导入名字 → 设置输出目录 → 点"开始批量"
+
+## 运行环境（源码运行）
 
 - Windows + 剪映专业版
 - Python 3.9+（仅需 `uiautomation` 依赖）
@@ -23,7 +32,7 @@
 pip install -r requirements.txt
 ```
 
-## 使用
+## 使用（源码运行）
 
 1. 打开剪映专业版，进入你的草稿项目
 2. **选中字幕条**（时间轴上点一下字幕）
@@ -37,12 +46,32 @@ pythonw gui_batch.pyw
 
 4. 按界面提示：输入/导入名字 → 设置输出目录 → 点"开始批量"
 
+## 从源码打包 exe
+
+需要先安装打包依赖：
+
+```bash
+pip install pyinstaller
+```
+
+然后运行：
+
+```bash
+python -m PyInstaller gui_batch.spec --noconfirm
+```
+
+生成物在 `dist/海外人名条批量生成.exe`（单文件、嵌入图标、带版本信息）。
+
 ## 目录结构
 
 ```
 Jianying-Name-Entry/
 ├── gui_batch.pyw              # 主界面程序
+├── gui_batch.spec             # PyInstaller 打包配置（onefile + 图标）
 ├── 启动海外人名条.bat          # 双击启动
+├── icon.ico / icon.png        # 程序图标
+├── make_icon.py               # 图标生成脚本
+├── version_info.txt           # exe 版本信息
 ├── requirements.txt
 └── src/pyJianYingDraft/       # 剪映控制库（精简自包含版）
     ├── __init__.py
