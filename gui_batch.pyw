@@ -318,6 +318,15 @@ class App:
         root.geometry('560x680')
         root.resizable(True, True)
 
+        # ---- 链接状态指示器
+        link_row = ttk.Frame(root); link_row.pack(fill='x', padx=10, pady=(8,0))
+        ttk.Label(link_row, text='剪映连接状态:').pack(side='left')
+        self.link_canvas = tk.Canvas(link_row, width=18, height=18, highlightthickness=0)
+        self.link_canvas.pack(side='left', padx=(6,4))
+        self.link_dot = self.link_canvas.create_oval(2, 2, 16, 16, fill='#cccccc', outline='')
+        self.link_status_var = tk.StringVar(value='检测中...')
+        ttk.Label(link_row, textvariable=self.link_status_var, font=('', 10, 'bold')).pack(side='left')
+
         # 剪映路径 + 启动
         ttk.Label(root, text='剪映路径 (用于启动剪映; 不填则自动探测)').pack(anchor='w', padx=10, pady=(10,2))
         jy_row = ttk.Frame(root); jy_row.pack(fill='x', padx=10)
@@ -396,6 +405,10 @@ class App:
         if saved:
             self.jy_path_var.set(saved)
 
+        # 启动链接状态轮询
+        self._polling = False
+        self._start_link_polling()
+
     # ---- 设置持久化
     def _load_setting(self, key):
         """从设置文件读取某个键的值"""
@@ -463,6 +476,8 @@ class App:
             return
         self._log(f'检查/启动剪映: {path}')
         self.prog_var.set('正在检查剪映...')
+        self._set_link_status('checking', '检查中...')
+        self._refresh_link_now()
         threading.Thread(target=self._launch_jianying_worker, args=(path,), daemon=True).start()
 
     def _launch_jianying_worker(self, path):
@@ -729,6 +744,7 @@ class App:
         auto_run = self.auto_run_var.get()
         self._log(f'开始自动打开草稿: {draft}' + ('(完成后自动开始批量)' if auto_run else ''))
         self.prog_var.set('正在打开草稿...')
+        self._refresh_link_now()
         # 后台线程执行, 避免阻塞UI
         threading.Thread(target=self._open_draft_worker, args=(draft, auto_run), daemon=True).start()
 
@@ -757,6 +773,63 @@ class App:
             self.prog_var.set('打开草稿异常')
         finally:
             self.root.after(0, lambda: self.prog_var.set(self.prog_var.get()))
+
+    # ---- 链接状态指示器
+    LINK_POLL_MS = 3000      # 轮询间隔(毫秒)
+    LINK_CHECK_TIMEOUT = 3   # 每次检测的超时(秒)
+
+    def _set_link_status(self, state, text):
+        """更新状态指示灯: state ∈ connected/disconnected/checking"""
+        color = {'connected': '#2ecc71', 'disconnected': '#e74c3c', 'checking': '#f1c40f'}
+        try:
+            self.link_canvas.itemconfig(self.link_dot, fill=color.get(state, '#cccccc'))
+            self.link_status_var.set(text)
+        except Exception:
+            pass
+
+    def _start_link_polling(self):
+        """启动链接状态轮询(定时, 非阻塞)"""
+        self._polling = True
+        self._link_checking = False
+        self.root.after(300, self._poll_link_status)
+
+    def _refresh_link_now(self):
+        """立即触发一次状态检测(供操作后即时反馈)"""
+        if getattr(self, '_polling', True):
+            self.root.after(150, self._poll_link_status)
+
+    def _poll_link_status(self):
+        """后台检测剪映连接状态, 完成后调度下一次轮询"""
+        if not getattr(self, '_polling', True):
+            return
+        # 避免上一次检测还在进行时重复起线程
+        if getattr(self, '_link_checking', False):
+            self.root.after(self.LINK_POLL_MS, self._poll_link_status)
+            return
+        self._link_checking = True
+        timeout = self.LINK_CHECK_TIMEOUT
+        holder = {}
+        def worker():
+            try:
+                ctypes.oledll.ole32.CoInitialize(None)
+            except Exception:
+                pass
+            try:
+                JianyingController(activate=False)
+                holder['ok'] = True
+            except Exception:
+                holder['ok'] = False
+        threading.Thread(target=worker, daemon=True).start()
+        # 主线程不等待, 用定时器在超时后收结果
+        def _check_done():
+            self._link_checking = False
+            if holder.get('ok'):
+                self._set_link_status('connected', '已连接')
+            else:
+                self._set_link_status('disconnected', '未连接')
+            if getattr(self, '_polling', True):
+                self.root.after(self.LINK_POLL_MS, self._poll_link_status)
+        self.root.after(int(timeout * 1000) + 200, _check_done)
 
     def _log(self, msg):
         def do():
