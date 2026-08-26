@@ -466,17 +466,15 @@ class App:
         threading.Thread(target=self._launch_jianying_worker, args=(path,), daemon=True).start()
 
     def _launch_jianying_worker(self, path):
-        """后台: 检测剪映是否在前台, 不在则启动, 再确认连接"""
-        # 检查剪映是否已在运行/前台
-        try:
-            JianyingController(activate=False)
+        """后台: 检测剪映是否在前台, 不在则启动, 再确认连接(全部带超时)"""
+        # 检测剪映是否已在前台(带超时, 剪映未运行时UIA会挂起)
+        ctrl = connect_jianying_timeout(activate=False, timeout=4)
+        if ctrl is not None:
             # 能连到窗口说明已在前台, 不重复启动
             self.root.after(0, lambda: messagebox.showinfo('剪映', '剪映已在运行并显示在前台'))
             self.root.after(0, lambda: self.prog_var.set('剪映已在前台'))
             return
-        except Exception:
-            pass
-        # 不在前台, 启动剪映
+        # 不在前台(超时或失败), 启动剪映
         try:
             self.root.after(0, lambda: self._log('剪映未在前台, 正在启动...'))
             self.root.after(0, lambda: self.prog_var.set('正在启动剪映...'))
@@ -484,16 +482,14 @@ class App:
         except Exception as ex:
             self.root.after(0, lambda: self._log(f'启动剪映失败: {ex}'))
             return
-        # 等剪映起来并连接
+        # 等剪映起来并连接(带超时, 避免挂起)
         for _ in range(20):
             time.sleep(0.5)
-            try:
-                JianyingController(activate=False)
+            ctrl = connect_jianying_timeout(activate=False, timeout=3)
+            if ctrl is not None:
                 self.root.after(0, lambda: self._log('✔ 剪映已启动并连接成功'))
                 self.root.after(0, lambda: self.prog_var.set('剪映已启动'))
                 return
-            except Exception:
-                continue
         self.root.after(0, lambda: self._log('剪映启动中, 若未出现请稍候或手动打开'))
 
     def show_help(self):
