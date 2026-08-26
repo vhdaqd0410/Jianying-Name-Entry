@@ -442,6 +442,9 @@ class JianyingController:
                     raise DraftNotFound(f"草稿{draft_name}无父控件")
                 logger.info("found draft %s, clicking", draft_name)
                 self._safe_click(lambda: draft_btn, f"find_and_click_draft.click:{draft_name}")
+                # 点击后窗口从首页切到编辑页(可能是不同窗口/句柄), 先短暂等切换再刷新app引用
+                time.sleep(1.0)
+                self.get_window(activate=False)
                 # 等草稿加载进入编辑页(检测时间轴出现), 比固定等8s更快更稳
                 self._wait_editor_ready(timeout=15)
                 return
