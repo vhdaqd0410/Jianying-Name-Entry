@@ -21,7 +21,7 @@ except ImportError as e:  # pragma: no cover
 
 from typing import Optional, Literal, Callable
 
-from .exceptions import AutomationError
+from .exceptions import AutomationError, DraftNotFound
 
 logger = logging.getLogger("jianying")
 
@@ -377,3 +377,109 @@ class JianyingController:
             self.app.SetTopmost(False)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ 打开草稿
+    def find_and_click_draft(self, draft_name: str, max_retries: int = 6, retry_interval: float = 5.0) -> None:
+        """在剪映首页查找并点击打开指定名称的草稿
+
+        Args:
+            draft_name: 草稿名称
+            max_retries: 最大重试次数
+            retry_interval: 重试间隔(秒)
+
+        Raises:
+            DraftNotFound: 未找到指定名称的剪映草稿
+        """
+        last_exc: Optional[BaseException] = None
+        for attempt in range(max_retries):
+            try:
+                draft_text = self.app.TextControl(
+                    searchDepth=2,
+                    Compare=ControlFinder.desc_matcher(f"HomePageDraftTitle:{draft_name}", exact=True),
+                )
+                if not self._safe_exists(
+                    lambda: draft_text, "find_and_click_draft.find", timeout=0
+                ):
+                    raise DraftNotFound(f"未找到名为{draft_name}的剪映草稿")
+                draft_btn = draft_text.GetParentControl()
+                if draft_btn is None:
+                    raise DraftNotFound(f"草稿{draft_name}无父控件")
+                logger.info("found draft %s, clicking", draft_name)
+                self._safe_click(lambda: draft_btn, f"find_and_click_draft.click:{draft_name}")
+                # 等草稿加载进入编辑页
+                time.sleep(8)
+                self.get_window()
+                return
+            except DraftNotFound as e:
+                last_exc = e
+                if attempt < max_retries - 1:
+                    logger.info("draft %s not found, retry %d/%d", draft_name, attempt + 1, max_retries)
+                    time.sleep(retry_interval)
+                    self.get_window()
+        if last_exc is not None:
+            raise last_exc
+        raise DraftNotFound(f"未找到名为{draft_name}的剪映草稿")
+
+    def click_subtitle_clip(self) -> bool:
+        """在编辑页时间轴上找到字幕条并点击选中。
+
+        字幕条位于 MainTimeLine 内的 GroupControl(QQuickItem)，内部含 QQuickText 显示文字。
+        点击其中心坐标以选中，便于后续替换文字。
+
+        Returns:
+            bool: 是否成功点击字幕条
+        """
+        try:
+            tl = self.app.Control(
+                searchDepth=6, ClassName="MainTimeLine_QMLTYPE_494"
+            )
+            if not self._safe_exists(lambda: tl, "click_subtitle_clip.find_timeline", timeout=1):
+                logger.warning("timeline not found")
+                return False
+            # 时间轴内的字幕条: GroupControl(QQuickItem), 内部含 QQuickText
+            candidates = []
+            for child in tl.GetChildren():
+                try:
+                    cn = child.ClassName
+                except Exception:
+                    continue
+                if cn.startswith("QQuickItem"):
+                    # 字幕条是扁横条(高度明显小于宽度)
+                    try:
+                        r = child.BoundingRectangle
+                    except Exception:
+                        continue
+                    w = r.right - r.left
+                    h = r.bottom - r.top
+                    if w > 100 and h < 60 and w > h:
+                        candidates.append(child)
+            if not candidates:
+                logger.warning("no subtitle clip found in timeline")
+                return False
+            # 点击第一个(通常即当前可见/目标字幕条)
+            target = candidates[0]
+            r = target.BoundingRectangle
+            cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+            self._safe_click(lambda: target, "click_subtitle_clip.click")
+            logger.info("clicked subtitle clip at (%d,%d)", cx, cy)
+            time.sleep(0.5)
+            return True
+        except Exception as exc:
+            logger.error("click_subtitle_clip failed: %r", exc)
+            return False
+
+    def open_draft_and_select_subtitle(self, draft_name: str) -> bool:
+        """打开指定草稿并点击选中字幕条（组合操作）
+
+        Args:
+            draft_name: 草稿名称
+
+        Returns:
+            bool: 是否成功打开草稿并选中字幕条
+        """
+        try:
+            self.find_and_click_draft(draft_name)
+            return self.click_subtitle_clip()
+        except DraftNotFound as e:
+            logger.error("open_draft failed: %r", e)
+            return False

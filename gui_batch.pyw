@@ -249,8 +249,15 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title('海外人名条批量生成')
-        root.geometry('560x640')
+        root.geometry('560x680')
         root.resizable(True, True)
+
+        # 草稿名自动打开
+        ttk.Label(root, text='草稿名 (留空则跳过, 用于自动打开草稿并选中字幕条)').pack(anchor='w', padx=10, pady=(10,2))
+        drow = ttk.Frame(root); drow.pack(fill='x', padx=10)
+        self.draft_var = tk.StringVar()
+        ttk.Entry(drow, textvariable=self.draft_var).pack(side='left', fill='x', expand=True, padx=(0,5))
+        ttk.Button(drow, text='打开草稿并选字幕', command=self.open_draft).pack(side='left')
 
         # 名字来源
         ttk.Label(root, text='名字列表 (每行一个, 或从CSV导入)').pack(anchor='w', padx=10, pady=(10,2))
@@ -442,6 +449,32 @@ class App:
     def stop(self):
         if self._runner: self._runner.stop()
         self.prog_var.set('正在停止...')
+
+    def open_draft(self):
+        draft = self.draft_var.get().strip()
+        if not draft:
+            messagebox.showwarning('提示', '请先输入草稿名')
+            return
+        self._log(f'开始自动打开草稿: {draft}')
+        self.prog_var.set('正在打开草稿...')
+        # 后台线程执行, 避免阻塞UI
+        threading.Thread(target=self._open_draft_worker, args=(draft,), daemon=True).start()
+
+    def _open_draft_worker(self, draft):
+        try:
+            ctrl = JianyingController()
+            ok = ctrl.open_draft_and_select_subtitle(draft)
+            if ok:
+                self._log(f'✔ 已打开草稿[{draft}]并选中字幕条, 可以开始批量')
+                self.prog_var.set('草稿已打开, 字幕条已选中')
+            else:
+                self._log(f'✘ 打开草稿[{draft}]或选字幕条失败')
+                self.prog_var.set('打开草稿失败')
+        except Exception as ex:
+            self._log(f'✘ 打开草稿异常: {ex}')
+            self.prog_var.set('打开草稿异常')
+        finally:
+            self.root.after(0, lambda: self.prog_var.set(self.prog_var.get()))
 
     def _log(self, msg):
         def do():
