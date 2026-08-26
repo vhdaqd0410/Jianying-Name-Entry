@@ -6,3 +6,4 @@ venv/
 dist/
 build/
 .draft_history.json
+config.json

@@ -28,6 +28,38 @@ DEFAULT_OUTDIR = os.path.join(os.path.expanduser(r'~\Desktop'), '海外人名条
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.draft_history.json')
 MAX_HISTORY = 20  # 最多保留的历史条数
 
+# 设置文件 (剪映路径等)
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+
+# 剪映常见安装路径 (用于自动探测)
+COMMON_JIANYING_PATHS = [
+    os.path.join(os.environ.get('LOCALAPPDATA', ''), 'JianyingPro', 'Apps', 'JianyingPro.exe'),
+    os.path.join(os.environ.get('LOCALAPPDATA', ''), 'JianyingPro', 'JianyingPro.exe'),
+    os.path.join(os.environ.get('PROGRAMFILES', ''), 'JianyingPro', 'JianyingPro.exe'),
+]
+
+def detect_jianying_path():
+    """自动探测剪映路径: 先找已运行的进程, 再查常见安装位置(标准库实现, 无额外依赖)"""
+    # 1. 从运行中的进程找 (wmic 查询可执行路径)
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(
+            'wmic process where "name=\'JianyingPro.exe\'" get ExecutablePath /value',
+            shell=True, stderr=_sp.DEVNULL, timeout=8,
+        ).decode('utf-8', 'ignore')
+        for line in out.splitlines():
+            if '=' in line:
+                exe = line.split('=', 1)[1].strip()
+                if exe and os.path.isfile(exe):
+                    return exe
+    except Exception:
+        pass
+    # 2. 查常见路径
+    for p in COMMON_JIANYING_PATHS:
+        if os.path.isfile(p):
+            return p
+    return ''
+
 # ------------------------------------------------------------------ 核心逻辑
 def set_clipboard(text):
     """写入系统剪贴板 (真实键盘粘贴用)"""
@@ -256,6 +288,16 @@ class App:
         root.geometry('560x680')
         root.resizable(True, True)
 
+        # 剪映路径 + 启动
+        ttk.Label(root, text='剪映路径 (用于启动剪映; 不填则自动探测)').pack(anchor='w', padx=10, pady=(10,2))
+        jy_row = ttk.Frame(root); jy_row.pack(fill='x', padx=10)
+        self.jy_path_var = tk.StringVar()
+        ttk.Entry(jy_row, textvariable=self.jy_path_var).pack(side='left', fill='x', expand=True, padx=(0,5))
+        ttk.Button(jy_row, text='浏览', command=self.pick_jianying).pack(side='left', padx=(0,3))
+        ttk.Button(jy_row, text='自动探测', command=self.auto_detect_jianying).pack(side='left', padx=(0,3))
+        ttk.Button(jy_row, text='启动剪映', command=self.launch_jianying).pack(side='left', padx=(0,6))
+        ttk.Button(jy_row, text='帮助', command=self.show_help).pack(side='left')
+
         # 草稿名自动打开 (下拉框带历史记忆)
         ttk.Label(root, text='草稿名 (留空则跳过, 用于自动打开草稿并选中字幕条)').pack(anchor='w', padx=10, pady=(10,2))
         drow = ttk.Frame(root); drow.pack(fill='x', padx=10)
@@ -318,6 +360,127 @@ class App:
         self.log_box.pack(fill='both', expand=True, padx=10, pady=(0,10))
         self._runner = None
         self._thread = None
+
+        # 加载已保存的剪映路径
+        saved = self._load_setting('jianying_path')
+        if saved:
+            self.jy_path_var.set(saved)
+
+    # ---- 设置持久化
+    def _load_setting(self, key):
+        """从设置文件读取某个键的值"""
+        try:
+            import json
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data.get(key, '')
+        except Exception:
+            pass
+        return ''
+
+    def _save_setting(self, key, value):
+        """把某个键的值写入设置文件"""
+        try:
+            import json
+            data = {}
+            if os.path.exists(SETTINGS_FILE):
+                try:
+                    with open(SETTINGS_FILE, encoding='utf-8') as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data[key] = value
+            with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    # ---- 剪映启动
+    def pick_jianying(self):
+        """手动选择剪映exe"""
+        path = filedialog.askopenfilename(title='选择剪映程序 JianyingPro.exe', filetypes=[('剪映程序','JianyingPro.exe'),('可执行文件','*.exe'),('所有','*.*')])
+        if path:
+            self.jy_path_var.set(path)
+            self._save_setting('jianying_path', path)
+            self._log(f'已设置剪映路径: {path}')
+
+    def auto_detect_jianying(self):
+        """自动探测剪映路径(优先已运行进程)"""
+        path = detect_jianying_path()
+        if path:
+            self.jy_path_var.set(path)
+            self._save_setting('jianying_path', path)
+            self._log(f'已自动探测到剪映: {path}')
+        else:
+            self._log('未探测到剪映, 请手动浏览选择路径')
+
+    def launch_jianying(self):
+        """启动剪映: 若剪映已在前台则提示, 否则用配置路径启动"""
+        path = self.jy_path_var.get().strip()
+        if not path:
+            # 无路径则自动探测一次
+            path = detect_jianying_path()
+            if path:
+                self.jy_path_var.set(path)
+                self._save_setting('jianying_path', path)
+        if not path or not os.path.isfile(path):
+            messagebox.showwarning('提示', '请先设置剪映路径 (浏览选择 JianyingPro.exe)')
+            return
+        # 检查剪映是否已在运行/前台
+        try:
+            JianyingController(activate=False)
+            # 能连到窗口说明已在前台, 不重复启动
+            messagebox.showinfo('剪映', '剪映已在运行并显示在前台')
+            return
+        except Exception:
+            pass
+        # 启动剪映
+        try:
+            self._log(f'启动剪映: {path}')
+            self.prog_var.set('正在启动剪映...')
+            os.startfile(path)
+            threading.Timer(8, self._after_launch_jianying).start()
+        except Exception as ex:
+            self._log(f'启动剪映失败: {ex}')
+
+    def _after_launch_jianying(self):
+        """启动剪映后延迟确认是否连上"""
+        try:
+            JianyingController(activate=False)
+            self.root.after(0, lambda: self._log('✔ 剪映已启动并连接成功'))
+            self.root.after(0, lambda: self.prog_var.set('剪映已启动'))
+        except Exception:
+            self.root.after(0, lambda: self._log('剪映启动中, 若未出现请稍候或手动打开'))
+
+    def show_help(self):
+        """显示使用帮助"""
+        help_text = (
+            "海外人名条批量生成 · 使用说明\n\n"
+            "1. 剪映路径\n"
+            "   设置 JianyingPro.exe 位置; 点'自动探测'自动找, 或'浏览'手动选。\n"
+            "   点'启动剪映'可拉起剪映(若未在前台)。\n\n"
+            "2. 打开草稿并选字幕\n"
+            "   在'草稿名'下拉框输入或选草稿名, 点'打开草稿并选字幕'。\n"
+            "   程序自动打开该草稿并点选时间轴上的字幕条。\n"
+            "   草稿名会被记住, 下次可直接下拉选择。\n\n"
+            "3. 名字列表\n"
+            "   每行一个名字(英文名)。可'从CSV导入''从TXT导入'或直接'粘贴'。\n\n"
+            "4. 开始批量\n"
+            "   填好名字后点'▶ 开始批量', 逐条替换字幕文字并导出为 mp4。\n"
+            "   文件按名字命名, 存到'输出目录'。\n\n"
+            "5. 自动执行\n"
+            "   勾选'打开草稿并选中后自动开始批量任务', 打开草稿成功即自动跑。\n\n"
+            "6. 完成后打开目录\n"
+            "   勾选后, 批量完整跑完自动弹出输出文件夹。\n\n"
+            "小提示\n"
+            "   - 请确保剪映专业版已打开、字幕条已就绪\n"
+            "   - 支持先小批量试跑确认效果再全量"
+        )
+        messagebox.showinfo('帮助', help_text)
 
     # ---- 名字输入
     def _is_english_name(self, s):
@@ -563,26 +726,55 @@ class App:
 
 
 def startup_check(root):
-    """启动时提示用户：打开草稿并选中字幕条（前提准备）"""
+    """启动时: 检测剪映是否可连; 不可连时用配置路径拉起剪映"""
     root.update()
     root.deiconify()
-    msg = (
-        "使用前请先在剪映中完成：\n\n"
-        " 1. 打开你的草稿项目\n"
-        " 2. 在时间轴上【选中字幕条】（点一下字幕即可）\n\n"
-        "然后点击下方按钮继续。\n\n"
-        "小提示：本工具会逐条替换你选中的字幕文字并导出。\n"
-        "若没选中正确的字幕条，导出可能用的是旧文字。"
-    )
-    ok = messagebox.askokcancel("开始前请准备", msg)
-    if not ok:
-        return False
-    # 再确认一次剪映是否可连
+    # 检测剪映是否可连
     try:
         JianyingController()
         return True
-    except Exception as ex:
-        messagebox.showerror("剪映未连接", f"无法连接剪映:\n{ex}\n\n请确认剪映专业版已打开。")
+    except Exception:
+        pass
+    # 剪映未运行/未连上, 尝试用配置路径启动
+    path = ''
+    try:
+        import json
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                path = data.get('jianying_path', '') or ''
+    except Exception:
+        path = ''
+    if not path or not os.path.isfile(path):
+        path = detect_jianying_path()
+    if path and os.path.isfile(path):
+        ok = messagebox.askyesno(
+            "启动剪映",
+            f"检测到剪映未运行或未在前台。\n\n是否用以下路径启动剪映？\n{path}",
+        )
+        if ok:
+            try:
+                os.startfile(path)
+            except Exception as ex:
+                messagebox.showerror("启动失败", str(ex))
+                return False
+            # 等剪映起来
+            for _ in range(15):
+                time.sleep(1)
+                try:
+                    JianyingController()
+                    return True
+                except Exception:
+                    pass
+            messagebox.showerror("剪映未连接", "剪映启动后未能连接, 请确认后重试。")
+            return False
+        return False
+    else:
+        messagebox.showerror(
+            "剪映未连接",
+            "无法连接剪映专业版。\n\n请在界面顶部设置剪映路径后点'启动剪映',\n或手动打开剪映后再启动本工具。",
+        )
         return False
 
 
