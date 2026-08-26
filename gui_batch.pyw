@@ -302,6 +302,9 @@ class App:
         self.start_btn.pack(side='left')
         self.stop_btn = ttk.Button(ctl, text='■ 停止', command=self.stop, state='disabled')
         self.stop_btn.pack(side='left', padx=6)
+        # 完成后自动打开成品目录
+        self.open_dir_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ctl, text='完成后打开目录', variable=self.open_dir_var).pack(side='left', padx=6)
         self.prog_var = tk.StringVar(value='就绪')
         ttk.Label(ctl, textvariable=self.prog_var).pack(side='left', padx=8)
 
@@ -445,15 +448,27 @@ class App:
 
     def _run_worker(self, names):
         try:
-            self._runner.run(names)
+            results = self._runner.run(names)
         except Exception as ex:
             self._log(f'致命错误: {ex}')
+            results = None
         finally:
-            self.root.after(0, self._finish)
+            self.root.after(0, lambda: self._finish(results, names))
 
-    def _finish(self):
+    def _finish(self, results, names):
         self.start_btn.config(state='normal'); self.stop_btn.config(state='disabled')
-        self.prog_var.set('完成')
+        # 判断是否完整跑完(非手动停止): 结果数==名字数
+        completed = bool(results) and len(results) == len(names)
+        self.prog_var.set('完成' if completed else '已停止')
+        # 勾选'完成后打开成品目录'且完整跑完时, 打开输出目录
+        if completed and self.open_dir_var.get():
+            outdir = self.outdir_var.get().strip() or DEFAULT_OUTDIR
+            if os.path.isdir(outdir):
+                try:
+                    os.startfile(outdir)
+                    self._log(f'📁 已打开成品目录: {outdir}')
+                except Exception as ex:
+                    self._log(f'打开目录失败: {ex}')
 
     def _on_progress(self, idx, total, name, status):
         self.pbar.config(value=idx)
