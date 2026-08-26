@@ -330,8 +330,8 @@ class App:
             root.iconbitmap(resource_path('icon.ico'))
         except Exception:
             pass
-        root.geometry('640x800')
-        root.minsize(600, 620)
+        root.geometry('960x760')
+        root.minsize(820, 620)
         root.resizable(True, True)
         self._setup_theme(root)
 
@@ -375,9 +375,14 @@ class App:
         except Exception:
             pass
 
+        # ============ 主容器: 左操作区 + 右日志区 ============
+        main = ttk.Frame(root); main.pack(fill='both', expand=True, padx=12, pady=(8,10))
+        left = ttk.Frame(main); left.pack(side='left', fill='both', expand=True)
+        right = ttk.Frame(main); right.pack(side='right', fill='y', padx=(10,0))
+
         # ============ 卡片① 剪映连接 ============
-        card1 = ttk.Labelframe(root, text='剪映连接', style='Card.TLabelframe')
-        card1.pack(fill='x', padx=12, pady=(6,0))
+        card1 = ttk.Labelframe(left, text='剪映连接', style='Card.TLabelframe')
+        card1.pack(fill='x', padx=0, pady=(0,0))
 
         # 链接状态 + 启动按钮
         link_row = ttk.Frame(card1); link_row.pack(fill='x', padx=12, pady=(8,3))
@@ -416,8 +421,8 @@ class App:
                        font=('Microsoft YaHei', 9)).pack(anchor='w', padx=12, pady=(0,8))
 
         # ============ 卡片② 名字列表 ============
-        card2 = ttk.Labelframe(root, text='名字列表', style='Card.TLabelframe')
-        card2.pack(fill='x', padx=12, pady=(8,0))
+        card2 = ttk.Labelframe(left, text='名字列表', style='Card.TLabelframe')
+        card2.pack(fill='x', padx=0, pady=(8,0))
         btns = ttk.Frame(card2); btns.pack(anchor='w', padx=12, pady=(10,2))
         ttk.Button(btns, text='从CSV导入', command=self.load_csv).pack(side='left', padx=(0,5))
         ttk.Button(btns, text='从TXT导入', command=self.load_txt).pack(side='left', padx=(0,5))
@@ -429,8 +434,8 @@ class App:
         self.name_box.pack(fill='x', padx=12, pady=(0,10))
 
         # ============ 卡片③ 输出与导出 ============
-        card3 = ttk.Labelframe(root, text='输出与导出', style='Card.TLabelframe')
-        card3.pack(fill='x', padx=12, pady=(8,0))
+        card3 = ttk.Labelframe(left, text='输出与导出', style='Card.TLabelframe')
+        card3.pack(fill='x', padx=0, pady=(8,0))
 
         # 输出目录
         ttk.Label(card3, text='输出目录 (成片保存位置)').pack(anchor='w', padx=12, pady=(8,2))
@@ -454,7 +459,7 @@ class App:
                        font=('Microsoft YaHei', 9)).pack(side='left', padx=14)
 
         # ============ 控制按钮 ============
-        ctl = ttk.Frame(root); ctl.pack(fill='x', padx=12, pady=(8,0))
+        ctl = ttk.Frame(left); ctl.pack(fill='x', padx=0, pady=(8,0))
         self.start_btn = ttk.Button(ctl, text='▶ 开始批量', command=self.start, style='Start.TButton')
         self.start_btn.pack(side='left')
         self.stop_btn = ttk.Button(ctl, text='■ 停止', command=self.stop, state='disabled', style='Stop.TButton')
@@ -463,7 +468,7 @@ class App:
         ttk.Label(ctl, textvariable=self.prog_var, font=('Microsoft YaHei', 9)).pack(side='left', padx=10)
 
         # ============ 进度条 ============
-        pbar_wrap = ttk.Frame(root); pbar_wrap.pack(fill='x', padx=12, pady=(8,0))
+        pbar_wrap = ttk.Frame(left); pbar_wrap.pack(fill='x', padx=0, pady=(8,0))
         self.pbar = ttk.Progressbar(pbar_wrap, mode='determinate',
                                     style='Highlight.Horizontal.TProgressbar')
         self.pbar.pack(fill='x')
@@ -476,12 +481,12 @@ class App:
         ttk.Label(pbar_wrap, textvariable=self.time_var,
                   font=('Microsoft YaHei', 9), foreground='#666666').pack(anchor='w', padx=2)
 
-        # ============ 日志 ============
-        log_card = ttk.Labelframe(root, text='日志', style='Card.TLabelframe')
-        log_card.pack(fill='both', expand=True, padx=12, pady=(8,0))
-        self.log_box = tk.Text(log_card, height=6, font=('Consolas', 9), state='disabled',
+        # ============ 日志(右侧面板) ============
+        log_card = ttk.Labelframe(right, text='日志', style='Card.TLabelframe')
+        log_card.pack(fill='both', expand=True)
+        self.log_box = tk.Text(log_card, width=30, font=('Consolas', 9), state='disabled',
                                bg='#ffffff', relief='solid', bd=1, wrap='word')
-        self.log_box.pack(fill='both', expand=True, padx=10, pady=8)
+        self.log_box.pack(fill='both', expand=True, padx=8, pady=8)
         self._runner = None
         self._thread = None
 
