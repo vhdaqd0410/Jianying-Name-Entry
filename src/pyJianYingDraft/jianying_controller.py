@@ -430,10 +430,11 @@ class JianyingController:
             bool: 是否成功点击字幕条
         """
         try:
+            # MainTimeLine 是主窗口的直接子控件(depth=1), 用浅层查找大幅减少UIA遍历时间
             tl = self.app.Control(
-                searchDepth=6, ClassName="MainTimeLine_QMLTYPE_494"
+                searchDepth=3, ClassName="MainTimeLine_QMLTYPE_494"
             )
-            if not self._safe_exists(lambda: tl, "click_subtitle_clip.find_timeline", timeout=1):
+            if not self._safe_exists(lambda: tl, "click_subtitle_clip.find_timeline", timeout=0.3):
                 logger.warning("timeline not found")
                 return False
             # 时间轴内的字幕条: GroupControl(QQuickItem), 内部含 QQuickText
@@ -456,13 +457,13 @@ class JianyingController:
             if not candidates:
                 logger.warning("no subtitle clip found in timeline")
                 return False
-            # 点击第一个(通常即当前可见/目标字幕条)
+            # 点击第一个(通常即当前可见/目标字幕条), 点击确认用短超时
             target = candidates[0]
             r = target.BoundingRectangle
             cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
-            self._safe_click(lambda: target, "click_subtitle_clip.click")
+            self._safe_click(lambda: target, "click_subtitle_clip.click", exists_timeout=0.3)
             logger.info("clicked subtitle clip at (%d,%d)", cx, cy)
-            time.sleep(0.5)
+            time.sleep(0.2)
             return True
         except Exception as exc:
             logger.error("click_subtitle_clip failed: %r", exc)
