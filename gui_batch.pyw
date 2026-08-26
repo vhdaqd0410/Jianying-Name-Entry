@@ -419,7 +419,8 @@ class App:
             self._log('未探测到剪映, 请手动浏览选择路径')
 
     def launch_jianying(self):
-        """启动剪映: 若剪映已在前台则提示, 否则用配置路径启动"""
+        """启动剪映: 若剪映已在前台则提示, 否则用配置路径启动。
+        全部在后台线程执行, 避免UIA检测阻塞主线程导致界面卡死。"""
         path = self.jy_path_var.get().strip()
         if not path:
             # 无路径则自动探测一次
@@ -430,31 +431,40 @@ class App:
         if not path or not os.path.isfile(path):
             messagebox.showwarning('提示', '请先设置剪映路径 (浏览选择 JianyingPro.exe)')
             return
+        self._log(f'检查/启动剪映: {path}')
+        self.prog_var.set('正在检查剪映...')
+        threading.Thread(target=self._launch_jianying_worker, args=(path,), daemon=True).start()
+
+    def _launch_jianying_worker(self, path):
+        """后台: 检测剪映是否在前台, 不在则启动, 再确认连接"""
         # 检查剪映是否已在运行/前台
         try:
             JianyingController(activate=False)
             # 能连到窗口说明已在前台, 不重复启动
-            messagebox.showinfo('剪映', '剪映已在运行并显示在前台')
+            self.root.after(0, lambda: messagebox.showinfo('剪映', '剪映已在运行并显示在前台'))
+            self.root.after(0, lambda: self.prog_var.set('剪映已在前台'))
             return
         except Exception:
             pass
-        # 启动剪映
+        # 不在前台, 启动剪映
         try:
-            self._log(f'启动剪映: {path}')
-            self.prog_var.set('正在启动剪映...')
+            self.root.after(0, lambda: self._log('剪映未在前台, 正在启动...'))
+            self.root.after(0, lambda: self.prog_var.set('正在启动剪映...'))
             os.startfile(path)
-            threading.Timer(8, self._after_launch_jianying).start()
         except Exception as ex:
-            self._log(f'启动剪映失败: {ex}')
-
-    def _after_launch_jianying(self):
-        """启动剪映后延迟确认是否连上"""
-        try:
-            JianyingController(activate=False)
-            self.root.after(0, lambda: self._log('✔ 剪映已启动并连接成功'))
-            self.root.after(0, lambda: self.prog_var.set('剪映已启动'))
-        except Exception:
-            self.root.after(0, lambda: self._log('剪映启动中, 若未出现请稍候或手动打开'))
+            self.root.after(0, lambda: self._log(f'启动剪映失败: {ex}'))
+            return
+        # 等剪映起来并连接
+        for _ in range(20):
+            time.sleep(0.5)
+            try:
+                JianyingController(activate=False)
+                self.root.after(0, lambda: self._log('✔ 剪映已启动并连接成功'))
+                self.root.after(0, lambda: self.prog_var.set('剪映已启动'))
+                return
+            except Exception:
+                continue
+        self.root.after(0, lambda: self._log('剪映启动中, 若未出现请稍候或手动打开'))
 
     def show_help(self):
         """显示使用帮助"""
