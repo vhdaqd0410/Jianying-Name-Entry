@@ -24,6 +24,10 @@ T_PASTE_WAIT = 0.35           # Ctrl+V 粘贴后
 T_CLIPBOARD = 0.15            # 写剪贴板后
 DEFAULT_OUTDIR = os.path.join(os.path.expanduser(r'~\Desktop'), '海外人名条')
 
+# 草稿名历史记录文件 (存到项目目录, 随工具迁移)
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.draft_history.json')
+MAX_HISTORY = 20  # 最多保留的历史条数
+
 # ------------------------------------------------------------------ 核心逻辑
 def set_clipboard(text):
     """写入系统剪贴板 (真实键盘粘贴用)"""
@@ -252,12 +256,18 @@ class App:
         root.geometry('560x680')
         root.resizable(True, True)
 
-        # 草稿名自动打开
+        # 草稿名自动打开 (下拉框带历史记忆)
         ttk.Label(root, text='草稿名 (留空则跳过, 用于自动打开草稿并选中字幕条)').pack(anchor='w', padx=10, pady=(10,2))
         drow = ttk.Frame(root); drow.pack(fill='x', padx=10)
         self.draft_var = tk.StringVar()
-        ttk.Entry(drow, textvariable=self.draft_var).pack(side='left', fill='x', expand=True, padx=(0,5))
+        self.draft_history = self._load_history()
+        self.draft_combo = ttk.Combobox(drow, textvariable=self.draft_var, values=self.draft_history, width=20)
+        self.draft_combo.pack(side='left', fill='x', expand=True, padx=(0,5))
+        self.draft_combo.bind('<Return>', lambda e: self.open_draft())
         ttk.Button(drow, text='打开草稿并选字幕', command=self.open_draft).pack(side='left')
+        # 勾选后: 打开草稿成功即自动开始批量
+        self.auto_run_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(root, text='打开草稿并选中后自动开始批量任务', variable=self.auto_run_var).pack(anchor='w', padx=12, pady=(3,0))
 
         # 名字来源
         ttk.Label(root, text='名字列表 (每行一个, 或从CSV导入)').pack(anchor='w', padx=10, pady=(10,2))
@@ -416,7 +426,12 @@ class App:
         if not names:
             messagebox.showwarning('提示', '请先输入名字列表')
             return
-        outdir = self.outdir_var.get().strip() or DEFAULT_OUTDIR
+        self._start_run(names, self.outdir_var.get().strip() or DEFAULT_OUTDIR)
+
+    def _start_run(self, names, outdir):
+        """启动批量任务(供按钮与自动执行共用)"""
+        if not names:
+            return
         self._log(f'输出目录: {outdir}')
         self._log(f'共{len(names)}个: {", ".join(names)}')
         self.start_btn.config(state='disabled'); self.stop_btn.config(state='normal')
@@ -450,24 +465,69 @@ class App:
         if self._runner: self._runner.stop()
         self.prog_var.set('正在停止...')
 
+    def _load_history(self):
+        """从配置文件加载草稿名历史"""
+        try:
+            if os.path.exists(HISTORY_FILE):
+                with open(HISTORY_FILE, encoding='utf-8') as f:
+                    import json
+                    data = json.load(f)
+                if isinstance(data, list):
+                    return [str(x) for x in data if str(x).strip()][:MAX_HISTORY]
+        except Exception:
+            pass
+        return []
+
+    def _save_history(self):
+        """把当前历史写回配置文件"""
+        try:
+            import json
+            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.draft_history, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _remember_draft(self, draft):
+        """记住草稿名: 置顶并去重, 刷新下拉框, 持久化"""
+        draft = draft.strip()
+        if not draft:
+            return
+        if draft in self.draft_history:
+            self.draft_history.remove(draft)
+        self.draft_history.insert(0, draft)
+        self.draft_history = self.draft_history[:MAX_HISTORY]
+        self.draft_combo['values'] = self.draft_history
+        self._save_history()
+
     def open_draft(self):
         draft = self.draft_var.get().strip()
         if not draft:
             messagebox.showwarning('提示', '请先输入草稿名')
             return
-        self._log(f'开始自动打开草稿: {draft}')
+        self._remember_draft(draft)
+        auto_run = self.auto_run_var.get()
+        self._log(f'开始自动打开草稿: {draft}' + ('(完成后自动开始批量)' if auto_run else ''))
         self.prog_var.set('正在打开草稿...')
         # 后台线程执行, 避免阻塞UI
-        threading.Thread(target=self._open_draft_worker, args=(draft,), daemon=True).start()
+        threading.Thread(target=self._open_draft_worker, args=(draft, auto_run), daemon=True).start()
 
-    def _open_draft_worker(self, draft):
+    def _open_draft_worker(self, draft, auto_run=False):
         try:
             # 选字幕是只读定位场景, 不激活窗口, 加快响应
             ctrl = JianyingController(activate=False)
             ok = ctrl.open_draft_and_select_subtitle(draft)
             if ok:
-                self._log(f'✔ 已打开草稿[{draft}]并选中字幕条, 可以开始批量')
+                self._log(f'✔ 已打开草稿[{draft}]并选中字幕条')
                 self.prog_var.set('草稿已打开, 字幕条已选中')
+                # 若勾选了自动执行, 且名字列表非空, 直接开始批量
+                if auto_run:
+                    names = self._get_names()
+                    if not names:
+                        self._log('⚠ 未检测到名字列表, 自动执行取消 (请先填写名字)')
+                        self.prog_var.set('自动执行取消: 无名字')
+                    else:
+                        self._log('→ 检测到自动执行勾选, 开始批量任务...')
+                        self._start_run(names, self.outdir_var.get().strip() or DEFAULT_OUTDIR)
             else:
                 self._log(f'✘ 打开草稿[{draft}]或选字幕条失败')
                 self.prog_var.set('打开草稿失败')
