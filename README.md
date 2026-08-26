@@ -16,7 +16,7 @@
 
 > 不想装 Python 环境的话，直接下载打包好的**单文件 exe** 即可运行，双击即用、自带图标。
 
-1. 到本仓库的 [Releases](https://github.com/vhdaqd0410/Jianying-Name-Entry/releases) 页面下载最新版本的 `海外人名条批量生成.exe`
+1. 到本仓库的 [Releases](https://github.com/vhdaqd0410/Jianying-Name-Entry/releases) 页面下载最新版本的单文件 exe（`JianyingNameEntry-vX.X.X.exe`，即「海外人名条批量生成」程序，因 GitHub 资产名不支持中文故用英文命名）
 2. 双击运行
 3. 打开剪映专业版，进入你的草稿项目，选中字幕条
 4. 输入/导入名字 → 设置输出目录 → 点"开始批量"
