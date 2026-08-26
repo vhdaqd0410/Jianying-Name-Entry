@@ -278,7 +278,11 @@ class BatchRunner:
         if os.path.exists(target):
             target = os.path.join(self.outdir, name + '(1).mp4')
         try:
-            os.replace(src, target)  # 同盘原子操作, 比shutil.move更快更稳
+            # 同盘用原子replace更快; 跨盘(如桌面C盘→O盘)用shutil.move自动copy+delete
+            if os.path.splitdrive(src)[0].lower() == os.path.splitdrive(target)[0].lower():
+                os.replace(src, target)
+            else:
+                shutil.move(src, target)
             self._log(f'  -> {target}')
             before_set.discard(src)
             return True
@@ -389,9 +393,26 @@ class App:
         self.prog_var = tk.StringVar(value='就绪')
         ttk.Label(ctl, textvariable=self.prog_var).pack(side='left', padx=8)
 
-        # 进度条
-        self.pbar = ttk.Progressbar(root, mode='determinate')
-        self.pbar.pack(fill='x', padx=10)
+        # 进度条 (加高+配色, 更醒目)
+        style = ttk.Style(root)
+        try:
+            style.theme_use('clam')
+            style.configure('Highlight.Horizontal.TProgressbar',
+                            troughcolor='#e0e0e0', background='#2ecc71',
+                            thickness=22)
+        except Exception:
+            pass
+        self.pbar = ttk.Progressbar(root, mode='determinate',
+                                    style='Highlight.Horizontal.TProgressbar')
+        self.pbar.pack(fill='x', padx=10, pady=(8,2))
+        # 进度文字 (百分比 + 计数)
+        self.progress_text_var = tk.StringVar(value='就绪')
+        ttk.Label(root, textvariable=self.progress_text_var,
+                  font=('', 11, 'bold')).pack(anchor='w', padx=10)
+        # 时间显示 (已用 + 预计剩余)
+        self.time_var = tk.StringVar(value='')
+        ttk.Label(root, textvariable=self.time_var,
+                  font=('', 9)).pack(anchor='w', padx=10, pady=(0,2))
 
         # 日志
         ttk.Label(root, text='日志').pack(anchor='w', padx=10, pady=(8,2))
@@ -654,6 +675,10 @@ class App:
         self.start_btn.config(state='disabled'); self.stop_btn.config(state='normal')
         self.pbar.config(maximum=len(names), value=0)
         self.prog_var.set('启动中...')
+        self._start_time = time.time()
+        self._total = len(names)
+        self.progress_text_var.set(f'准备中... (0/{len(names)})')
+        self.time_var.set('')
         self._outdir = outdir
         self._thread = threading.Thread(target=self._run_worker, args=(names,), daemon=True)
         self._thread.start()
@@ -681,6 +706,11 @@ class App:
         # 判断是否完整跑完(非手动停止): 结果数==名字数
         completed = bool(results) and len(results) == len(names)
         self.prog_var.set('完成' if completed else '已停止')
+        if completed and getattr(self, '_start_time', None):
+            used = time.time() - self._start_time
+            self.time_var.set(f'总用时 {self._fmt_time(used)}')
+        else:
+            self.time_var.set('')
         # 勾选'完成后打开成品目录'且完整跑完时, 打开输出目录
         if completed and self.open_dir_var.get():
             outdir = self.outdir_var.get().strip() or DEFAULT_OUTDIR
@@ -693,9 +723,29 @@ class App:
 
     def _on_progress(self, idx, total, name, status):
         self.pbar.config(value=idx)
-        if status == 'running': self.prog_var.set(f'正在处理 {name} ({idx}/{total})')
-        elif status == 'ok': self.prog_var.set(f'✓ {name} 成功 ({idx}/{total})')
-        else: self.prog_var.set(f'✗ {name} 失败 ({idx}/{total})')
+        pct = int(idx / total * 100) if total else 0
+        # 进度文字(醒目)
+        if status == 'running':
+            self.progress_text_var.set(f'▌处理中 {name}  ({idx}/{total} · {pct}%)')
+        elif status == 'ok':
+            self.progress_text_var.set(f'✓ {name} 成功  ({idx}/{total} · {pct}%)')
+        else:
+            self.progress_text_var.set(f'✗ {name} 失败  ({idx}/{total} · {pct}%)')
+        self.prog_var.set(f'{idx}/{total} ({pct}%)')
+        # 已用时间 + 预计剩余
+        if getattr(self, '_start_time', None) and idx > 0:
+            used = time.time() - self._start_time
+            eta = used / idx * (total - idx)
+            self.time_var.set(f'已用 {self._fmt_time(used)} · 预计剩余 {self._fmt_time(eta)}')
+
+    def _fmt_time(self, sec):
+        """秒 -> mm:ss (或 hh:mm:ss)"""
+        sec = max(0, int(sec))
+        h, rem = divmod(sec, 3600)
+        m, s = divmod(rem, 60)
+        if h:
+            return f'{h}:{m:02d}:{s:02d}'
+        return f'{m:02d}:{s:02d}'
 
     def stop(self):
         if self._runner: self._runner.stop()
