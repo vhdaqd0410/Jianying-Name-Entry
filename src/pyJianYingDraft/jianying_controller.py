@@ -72,11 +72,24 @@ class JianyingController:
     app_status: Literal["home", "edit", "pre_export"]
     app_sub_status: Literal["none", "export_start", "exporting", "export_succeed"]
 
-    def __init__(self):
-        """初始化剪映控制器，此时剪映应处于目录或编辑页"""
-        self.get_window()
+    def __init__(self, *, activate: bool = True):
+        """初始化剪映控制器，此时剪映应处于目录或编辑页
+
+        Args:
+            activate: 是否激活窗口。选字幕等只读定位场景传False可加快启动。
+        """
+        self.get_window(activate=activate)
 
     # ------------------------------------------------------------------ 底层工具
+    def _mouse_click(self, x: int, y: int) -> None:
+        """用 user32 模拟鼠标点击屏幕坐标(比 UIA Control.Click 快很多) """
+        try:
+            ctypes.windll.user32.SetCursorPos(int(x), int(y))
+            ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+            ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+        except Exception as exc:
+            logger.warning("mouse click failed: %r", exc)
+
     def _safe_click(
         self,
         get_control: Callable[[], uia.Control],
@@ -325,8 +338,15 @@ class JianyingController:
         self,
         max_retries: Optional[int] = None,
         retry_interval: Optional[float] = None,
+        *,
+        activate: bool = True,
     ) -> None:
-        """寻找剪映窗口；未找到时按间隔重试"""
+        """寻找剪映窗口；未找到时按间隔重试
+
+        Args:
+            activate: 是否在找到后激活窗口并置顶(设为False可跳过激活, 更快)。
+                选字幕等只读定位场景传False。
+        """
         if max_retries is None:
             max_retries = self.WINDOW_FIND_MAX_RETRIES
         if retry_interval is None:
@@ -334,7 +354,7 @@ class JianyingController:
 
         if hasattr(self, "app"):
             try:
-                if self._exists_with_com_retry(
+                if activate and self._exists_with_com_retry(
                     self.app, "get_window.clear_topmost",
                     timeout=0, raise_on_exhausted=False,
                 ):
@@ -372,13 +392,29 @@ class JianyingController:
 
         logger.info("app_status: %s, app_sub_status: %s", self.app_status, self.app_sub_status)
 
-        self.app.SetActive()
-        try:
-            self.app.SetTopmost(False)
-        except Exception:
-            pass
+        if activate:
+            self.app.SetActive()
+            try:
+                self.app.SetTopmost(False)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ 打开草稿
+    def _wait_editor_ready(self, timeout: float = 15) -> bool:
+        """等待草稿加载完成(编辑页时间轴出现)。比固定 sleep 更快, 草稿一加载完就返回。"""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                tl = self.app.Control(searchDepth=3, ClassName="MainTimeLine_QMLTYPE_494")
+                if tl.Exists(0):
+                    logger.info("editor ready after %.1fs", time.time() - t0)
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.5)
+        logger.warning("editor not ready within %.1fs", timeout)
+        return False
+
     def find_and_click_draft(self, draft_name: str, max_retries: int = 6, retry_interval: float = 5.0) -> None:
         """在剪映首页查找并点击打开指定名称的草稿
 
@@ -406,9 +442,8 @@ class JianyingController:
                     raise DraftNotFound(f"草稿{draft_name}无父控件")
                 logger.info("found draft %s, clicking", draft_name)
                 self._safe_click(lambda: draft_btn, f"find_and_click_draft.click:{draft_name}")
-                # 等草稿加载进入编辑页
-                time.sleep(8)
-                self.get_window()
+                # 等草稿加载进入编辑页(检测时间轴出现), 比固定等8s更快更稳
+                self._wait_editor_ready(timeout=15)
                 return
             except DraftNotFound as e:
                 last_exc = e
@@ -457,13 +492,13 @@ class JianyingController:
             if not candidates:
                 logger.warning("no subtitle clip found in timeline")
                 return False
-            # 点击第一个(通常即当前可见/目标字幕条), 点击确认用短超时
+            # 点击第一个(通常即当前可见/目标字幕条): 用user32模拟鼠标点击中心, 比UIA Click快很多
             target = candidates[0]
             r = target.BoundingRectangle
             cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
-            self._safe_click(lambda: target, "click_subtitle_clip.click", exists_timeout=0.3)
+            self._mouse_click(cx, cy)
             logger.info("clicked subtitle clip at (%d,%d)", cx, cy)
-            time.sleep(0.2)
+            time.sleep(0.15)
             return True
         except Exception as exc:
             logger.error("click_subtitle_clip failed: %r", exc)

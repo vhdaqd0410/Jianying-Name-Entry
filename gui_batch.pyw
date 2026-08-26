@@ -462,7 +462,8 @@ class App:
 
     def _open_draft_worker(self, draft):
         try:
-            ctrl = JianyingController()
+            # 选字幕是只读定位场景, 不激活窗口, 加快响应
+            ctrl = JianyingController(activate=False)
             ok = ctrl.open_draft_and_select_subtitle(draft)
             if ok:
                 self._log(f'✔ 已打开草稿[{draft}]并选中字幕条, 可以开始批量')
