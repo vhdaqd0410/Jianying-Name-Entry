@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# 海外人名条批量生成 · v1.0.5 · onefile 单文件打包配置(嵌入 icon.ico)
+# 海外人名条批量生成 · v1.2.0 · onefile 单文件打包配置(嵌入 icon.ico)
 import os
 
 name = '海外人名条批量生成'

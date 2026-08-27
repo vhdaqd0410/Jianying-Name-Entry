@@ -37,6 +37,9 @@ MAX_HISTORY = 20  # 最多保留的历史条数
 # 设置文件 (剪映路径等)
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
 
+# 项目模板文件 (预设: 项目名/输出目录/勾选项组合)
+TEMPLATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates.json')
+
 # 剪映常见安装路径 (用于自动探测)
 COMMON_JIANYING_PATHS = [
     os.path.join(os.environ.get('LOCALAPPDATA', ''), 'JianyingPro', 'Apps', 'JianyingPro.exe'),
@@ -116,11 +119,12 @@ def click(x, y):
 
 class BatchRunner:
     """批量导出运行器(在后台线程跑, 界面用回调更新)"""
-    def __init__(self, ctrl, outdir, resolution=None, framerate=None, log_cb=None, progress_cb=None):
+    def __init__(self, ctrl, outdir, resolution=None, framerate=None, log_cb=None, progress_cb=None, dry_run=False):
         self.ctrl = ctrl
         self.outdir = outdir
         self.resolution = resolution
         self.framerate = framerate
+        self.dry_run = dry_run
         self.log_cb = log_cb or (lambda *a: None)
         self.progress_cb = progress_cb or (lambda *a: None)
         self._stop = threading.Event()
@@ -246,6 +250,9 @@ class BatchRunner:
     # ---- 单名字处理, 返回 True=成功
     def process_one(self, name, before_set):
         self._log(f'\n=== {name} ===')
+        # 干跑模式: 不操作剪映, 只模拟预览
+        if self.dry_run:
+            return self._process_one_dry(name)
         # 确保剪映前台+文本框可见
         try:
             hwnd = self.ctrl.app.NativeWindowHandle
@@ -312,6 +319,21 @@ class BatchRunner:
             before_set.add(src)
             return False
 
+    # ---- 干跑预览: 不操作剪映, 只模拟预览每个名字将如何处理
+    def _process_one_dry(self, name):
+        issues = []
+        # 输出路径检查
+        target = os.path.join(self._outdir_actual, name + '.mp4')
+        if os.path.exists(target):
+            issues.append(f'⚠ 已存在同名文件, 将另存为 {name}(1).mp4')
+        # 输出目录检查
+        if not os.path.isdir(self._outdir_actual):
+            issues.append('⚠ 输出目录不存在, 将自动创建')
+        if issues:
+            self._log('  ' + '; '.join(issues))
+        self._log(f'  [预览] 将导出 → {target}')
+        return True
+
     # ---- 批量入口
     def run(self, names, project=''):
         # 若指定了项目名, 输出目录下建 项目名_日期/ 子目录, 实现「项目+时间」归档
@@ -349,11 +371,15 @@ class BatchRunner:
         self._log(f'\n===== 结果: 成功{len(ok_names)} 失败{len(fail_names)} =====')
         if fail_names:
             self._log('失败: ' + ', '.join(fail_names))
-        # 写 run_log.csv (成功/失败、耗时、时间戳)
-        try:
-            self._write_run_log(outdir, names, results, run_start)
-        except Exception as ex:
-            self._log(f'写run_log失败: {ex}')
+        # 写 run_log.csv (成功/失败、耗时、时间戳)。干跑预览不写正式日志。
+        if not self.dry_run:
+            try:
+                self._write_run_log(outdir, names, results, run_start)
+            except Exception as ex:
+                self._log(f'写run_log失败: {ex}')
+        else:
+            ok_names = [n for n, v in results.items() if v]
+            self._log(f'\n[预览结束] 共{len(names)}个, 均可正常导出 (可开始正式批量)')
         return results
 
     def _write_run_log(self, outdir, names, results, run_start):
@@ -439,6 +465,11 @@ class App:
                             font=('Microsoft YaHei', 10, 'bold'), padding=(14, 7))
             style.map('Pause.TButton',
                       background=[('active', '#6e6e80'), ('pressed', '#5a5a6a'), ('disabled', '#c6c6d0')])
+            # 干跑预览按钮(青)
+            style.configure('Preview.TButton', background='#16a085', foreground='white',
+                            font=('Microsoft YaHei', 10, 'bold'), padding=(14, 7))
+            style.map('Preview.TButton',
+                      background=[('active', '#138d75'), ('pressed', '#0e6e5c'), ('disabled', '#b5d8d0')])
             # 进度条
             style.configure('Highlight.Horizontal.TProgressbar',
                             troughcolor='#e0e0e0', background=ok_green, thickness=22)
@@ -539,10 +570,28 @@ class App:
                        bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
                        font=('Microsoft YaHei', 9)).pack(side='left', padx=14)
 
+        # 配置备份/恢复 (第二版: 配置中心化)
+        cfg_row = ttk.Frame(card3); cfg_row.pack(fill='x', padx=12, pady=(0,4))
+        ttk.Label(cfg_row, text='配置').pack(side='left')
+        ttk.Button(cfg_row, text='💾 备份配置', command=self.backup_config).pack(side='left', padx=(6,3))
+        ttk.Button(cfg_row, text='📂 恢复配置', command=self.restore_config).pack(side='left', padx=(0,3))
+        ttk.Label(cfg_row, text='(导出/导入单个 .json, 换机迁移用)', foreground='#888888').pack(side='left', padx=4)
+
+        # 项目模板 (第二版: 预设保存/加载)
+        tpl_row = ttk.Frame(card3); tpl_row.pack(fill='x', padx=12, pady=(0,6))
+        ttk.Label(tpl_row, text='项目模板').pack(side='left')
+        self.tpl_combo = ttk.Combobox(tpl_row, width=16, state='readonly')
+        self.tpl_combo.pack(side='left', padx=(6,3))
+        self.tpl_combo.bind('<<ComboboxSelected>>', self._tpl_selected)
+        ttk.Button(tpl_row, text='💾 存为模板', command=self.save_template).pack(side='left', padx=(0,3))
+        ttk.Button(tpl_row, text='🗑 删除模板', command=self.delete_template).pack(side='left')
+
         # ============ 控制按钮 ============
         ctl = ttk.Frame(left); ctl.pack(fill='x', padx=0, pady=(8,0))
         self.start_btn = ttk.Button(ctl, text='▶ 开始批量', command=self.start, style='Start.TButton')
         self.start_btn.pack(side='left')
+        self.preview_btn = ttk.Button(ctl, text='👁 干跑预览', command=self.preview, style='Preview.TButton')
+        self.preview_btn.pack(side='left', padx=(0,8))
         self.stop_btn = ttk.Button(ctl, text='■ 停止', command=self.stop, state='disabled', style='Stop.TButton')
         self.stop_btn.pack(side='left', padx=8)
         # 暂停/继续按钮 (运行中可用; 或按 Ctrl+P / 空格)
@@ -579,10 +628,11 @@ class App:
         self._runner = None
         self._thread = None
 
-        # 加载已保存的剪映路径
-        saved = self._load_setting('jianying_path')
-        if saved:
-            self.jy_path_var.set(saved)
+        # 加载已保存的设置(剪映路径/输出目录/项目名/勾选项等)
+        self._load_all_settings()
+        # 初始化项目模板下拉框
+        self._templates = {}
+        self._refresh_templates()
 
         # 启动链接状态轮询
         self._polling = False
@@ -627,6 +677,182 @@ class App:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
+
+    # ---- 配置中心化 (第二版): 收集/应用所有设置 + 备份/恢复
+    def _collect_settings(self):
+        """把当前界面所有可持久化设置收集成 dict"""
+        return {
+            'jianying_path': self.jy_path_var.get().strip(),
+            'output_dir': self.outdir_var.get().strip(),
+            'project': self.project_var.get().strip(),
+            'open_dir': bool(self.open_dir_var.get()),
+            'auto_run': bool(self.auto_run_var.get()),
+            'resolution': self.res_var.get(),
+            'framerate': self.fps_var.get(),
+        }
+
+    def _apply_settings(self, data):
+        """把设置 dict 应用到界面 (忽略不存在的键)"""
+        if not isinstance(data, dict):
+            return
+        mapping = {
+            'jianying_path': lambda v: self.jy_path_var.set(str(v)),
+            'output_dir': lambda v: self.outdir_var.set(str(v)),
+            'project': lambda v: self.project_var.set(str(v)),
+            'open_dir': lambda v: self.open_dir_var.set(bool(v)),
+            'auto_run': lambda v: self.auto_run_var.set(bool(v)),
+            'resolution': lambda v: self.res_var.set(str(v)),
+            'framerate': lambda v: self.fps_var.set(str(v)),
+        }
+        for k, fn in mapping.items():
+            if k in data:
+                try:
+                    fn(data[k])
+                except Exception:
+                    pass
+
+    def _save_all_settings(self):
+        """把当前界面全部设置写入 config.json"""
+        data = self._collect_settings()
+        # 保留已有的其他键(如后续新增)
+        try:
+            import json
+            if os.path.exists(SETTINGS_FILE):
+                try:
+                    with open(SETTINGS_FILE, encoding='utf-8') as f:
+                        old = json.load(f)
+                    if isinstance(old, dict):
+                        old.update(data)
+                        data = old
+                except Exception:
+                    pass
+            with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _load_all_settings(self):
+        """启动时把 config.json 的全部设置应用到界面"""
+        try:
+            import json
+            if os.path.exists(SETTINGS_FILE):
+                with open(SETTINGS_FILE, encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self._apply_settings(data)
+        except Exception:
+            pass
+
+    def backup_config(self):
+        """备份配置: 把当前界面设置(含剪映路径/输出目录/项目名/勾选项)导出为单个 .json"""
+        path = filedialog.asksaveasfilename(
+            title='备份配置', defaultextension='.json',
+            initialfile='剪映人名条_配置备份.json',
+            filetypes=[('配置备份', '*.json')])
+        if not path:
+            return
+        try:
+            import json
+            data = self._collect_settings()
+            # 附上导出时间戳
+            data['_backup_time'] = time.strftime('%Y-%m-%d %H:%M:%S')
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            self._log(f'💾 配置已备份: {path}')
+        except Exception as ex:
+            messagebox.showerror('备份失败', str(ex))
+
+    def restore_config(self):
+        """恢复配置: 从备份 .json 导入设置并应用到界面"""
+        path = filedialog.askopenfilename(title='选择配置备份', filetypes=[('配置备份', '*.json')])
+        if not path:
+            return
+        try:
+            import json
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError('备份文件格式不正确')
+            self._apply_settings(data)
+            self._save_all_settings()
+            self._log(f'📂 已恢复配置: {path}')
+            self._refresh_templates()
+        except Exception as ex:
+            messagebox.showerror('恢复失败', str(ex))
+
+    # ---- 项目模板 (第二版): 预设保存/加载
+    def _load_templates(self):
+        """从模板文件读取项目模板 dict {名字: 设置dict}"""
+        try:
+            import json
+            if os.path.exists(TEMPLATE_FILE):
+                with open(TEMPLATE_FILE, encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_templates(self, templates):
+        """把项目模板 dict 写入模板文件"""
+        try:
+            import json
+            with open(TEMPLATE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(templates, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _refresh_templates(self):
+        """刷新模板下拉框选项"""
+        try:
+            tpls = self._load_templates()
+            self._templates = tpls
+            self.tpl_combo['values'] = list(tpls.keys())
+        except Exception:
+            self._templates = {}
+            self.tpl_combo['values'] = []
+
+    def save_template(self):
+        """把当前项目名/输出目录/勾选项存为一个模板"""
+        project = self.project_var.get().strip()
+        name = project or self.outdir_var.get().strip() or '未命名项目'
+        # 让用户命名模板
+        import tkinter.simpledialog as simpledialog
+        tname = simpledialog.askstring('存为模板', '模板名称:', initialvalue=name, parent=self.root)
+        if not tname:
+            return
+        tname = tname.strip()
+        if not tname:
+            return
+        tpls = self._load_templates()
+        tpls[tname] = self._collect_settings()
+        self._save_templates(tpls)
+        self._refresh_templates()
+        self._log(f'💾 已保存项目模板: {tname}')
+
+    def _tpl_selected(self, event):
+        """从下拉框选择一个模板并应用"""
+        name = self.tpl_combo.get()
+        tpls = self._load_templates()
+        if name in tpls:
+            self._apply_settings(tpls[name])
+            self._log(f'📂 已应用项目模板: {name}')
+
+    def delete_template(self):
+        """删除当前选中的模板"""
+        name = self.tpl_combo.get()
+        if not name:
+            messagebox.showinfo('删除模板', '请先在下拉框选择要删除的模板')
+            return
+        if messagebox.askyesno('删除模板', f'确定删除模板「{name}」?'):
+            tpls = self._load_templates()
+            if name in tpls:
+                del tpls[name]
+                self._save_templates(tpls)
+                self._refresh_templates()
+                self.tpl_combo.set('')
+                self._log(f'🗑 已删除模板: {name}')
 
     # ---- 剪映启动
     def pick_jianying(self):
@@ -715,9 +941,17 @@ class App:
             "6. 暂停/重跑\n"
             "   运行中可点'⏸ 暂停'或按空格/Ctrl+P 临时暂停/继续。\n"
             "   跑完若有失败, '↻ 重跑失败'按钮会点亮, 一键重试失败的名字。\n\n"
-            "7. 自动执行\n"
+            "7. 干跑预览 (v1.2.0)\n"
+            "   点'👁 干跑预览'先不操作剪映, 模拟预览每个名字将导出到哪、\n"
+            "   有没有同名/路径问题。适合正式跑之前先试一遍。\n\n"
+            "8. 项目模板 (v1.2.0)\n"
+            "   把'项目名+输出目录+勾选项'存成模板, 下拉框一键加载/删除, 复用常用配置。\n\n"
+            "9. 配置备份 (v1.2.0)\n"
+            "   '💾 备份配置'把剪映路径/输出目录/项目名/勾选项导出为单个 .json, \n"
+            "   '📂 恢复配置'换机迁移时一键导入。\n\n"
+            "10. 自动执行\n"
             "   勾选'打开草稿并选中后自动开始批量任务', 打开草稿成功即自动跑。\n\n"
-            "8. 完成后打开目录\n"
+            "11. 完成后打开目录\n"
             "   勾选后, 批量完整跑完自动弹出输出文件夹。\n\n"
             "小提示\n"
             "   - 请确保剪映专业版已打开、字幕条已就绪\n"
@@ -837,10 +1071,49 @@ class App:
             return
         self._start_run(names, self.outdir_var.get().strip() or DEFAULT_OUTDIR)
 
+    def preview(self):
+        """干跑预览: 不连接/不操作剪映, 只模拟预览每个名字将如何处理。
+        契合'先小批量试跑再全量'工作流, 提前发现名字格式/输出路径/归档问题。"""
+        names = self._get_names()
+        if not names:
+            messagebox.showwarning('提示', '请先输入名字列表')
+            return
+        project = self.project_var.get().strip()
+        outdir = self.outdir_var.get().strip() or DEFAULT_OUTDIR
+        self._log(f'\n[干跑预览] 共{len(names)}个名字, 项目={project or "(无)"}')
+        self._log(f'[干跑预览] 输出目录: {outdir}')
+        self._log(f'[干跑预览] 注意: 此模式不操作剪映, 仅模拟预览')
+        self.start_btn.config(state='disabled')
+        self.preview_btn.config(state='disabled')
+        self.pbar.config(maximum=len(names), value=0)
+        self._start_time = time.time()
+        self._total = len(names)
+        self._running = True
+        self.progress_text_var.set(f'预览中... (0/{len(names)})')
+        self.time_var.set('')
+        # 用假 controller + dry_run, 在后台线程跑
+        self._thread = threading.Thread(target=self._preview_worker,
+                                        args=(names, project, outdir), daemon=True)
+        self._thread.start()
+
+    def _preview_worker(self, names, project, outdir):
+        try:
+            # 干跑不需要真实剪映连接; 用空 controller
+            runner = BatchRunner(None, outdir, log_cb=self._log,
+                                 progress_cb=self._on_progress, dry_run=True)
+            results = runner.run(names, project)
+        except Exception as ex:
+            self._log(f'预览异常: {ex}')
+            results = None
+        finally:
+            self.root.after(0, lambda: self._finish_preview(results, names))
+
     def _start_run(self, names, outdir):
         """启动批量任务(供按钮与自动执行共用)。连接剪映放后台线程, 避免卡界面"""
         if not names:
             return
+        # 每次开始批量前持久化当前设置
+        self._save_all_settings()
         project = self.project_var.get().strip()
         self._log(f'输出目录: {outdir}' + (f' | 项目: {project}' if project else ''))
         self._log(f'共{len(names)}个: {", ".join(names)}')
@@ -913,6 +1186,17 @@ class App:
                     self._log(f'📁 已打开成品目录: {outdir}')
                 except Exception as ex:
                     self._log(f'打开目录失败: {ex}')
+
+    def _finish_preview(self, results, names):
+        """干跑预览完成: 恢复按钮, 不打开目录、不写run_log"""
+        self.start_btn.config(state='normal')
+        self.preview_btn.config(state='normal')
+        self._running = False
+        self.prog_var.set('预览完成')
+        if results and len(results) == len(names):
+            self._play_beep('ok')
+        else:
+            self._log('预览中断')
 
     def rerun_failed(self):
         """一键重跑上次失败的名字 (契合先小批量试跑再全量的工作流)"""

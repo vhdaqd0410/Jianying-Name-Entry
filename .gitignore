@@ -7,5 +7,6 @@ dist/
 build/
 .draft_history.json
 config.json
+templates.json
 backup_*/
 _*test*.py
