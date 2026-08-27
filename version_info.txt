@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 5, 0),
-    prodvers=(1, 0, 5, 0),
+    filevers=(1, 1, 0, 0),
+    prodvers=(1, 1, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,11 +16,11 @@ VSVersionInfo(
           '040904B0',
           [StringStruct('CompanyName', 'HanaAgent'),
            StringStruct('FileDescription', '海外人名条批量生成'),
-           StringStruct('FileVersion', '1.0.5'),
+           StringStruct('FileVersion', '1.1.0'),
            StringStruct('InternalName', 'JianyingNameEntry'),
            StringStruct('OriginalFilename', 'JianyingNameEntry.exe'),
            StringStruct('ProductName', '海外人名条批量生成'),
-           StringStruct('ProductVersion', '1.0.5')]
+           StringStruct('ProductVersion', '1.1.0')]
         )
       ]
     ),

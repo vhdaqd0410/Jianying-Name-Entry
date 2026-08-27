@@ -124,9 +124,24 @@ class BatchRunner:
         self.log_cb = log_cb or (lambda *a: None)
         self.progress_cb = progress_cb or (lambda *a: None)
         self._stop = threading.Event()
+        self._pause = threading.Event()
+        self._pause.set()   # 默认不暂停
+        self._per_name_time = {}   # 每个名字的耗时, 供 run_log 使用
+        self._outdir_actual = outdir  # 实际落盘目录(含归档子目录), run 后更新
 
     def stop(self):
         self._stop.set()
+        self._pause.set()  # 解除暂停, 让线程能退出
+
+    def pause(self):
+        self._pause.clear()
+
+    def resume(self):
+        self._pause.set()
+
+    @property
+    def is_paused(self):
+        return not self._pause.is_set()
 
     def _log(self, msg):
         self.log_cb(msg)
@@ -298,17 +313,34 @@ class BatchRunner:
             return False
 
     # ---- 批量入口
-    def run(self, names):
-        os.makedirs(self.outdir, exist_ok=True)
+    def run(self, names, project=''):
+        # 若指定了项目名, 输出目录下建 项目名_日期/ 子目录, 实现「项目+时间」归档
+        outdir = self.outdir
+        archive_sub = ''
+        if project:
+            safe = ''.join(c for c in project if c not in r'\/:*?"<>|').strip()
+            if safe:
+                date = time.strftime('%Y%m%d')
+                archive_sub = f'{safe}_{date}'
+                outdir = os.path.join(self.outdir, archive_sub)
+        os.makedirs(outdir, exist_ok=True)
+        self._outdir_actual = outdir
         before_set = set(self.desktop_exports())
         results = {}
+        run_start = time.time()
         for idx, name in enumerate(names, 1):
             if self._stop.is_set():
                 self._log('\n(已停止)')
                 break
+            self._pause.wait()  # 若暂停则等待(解除暂停/停止才继续)
+            if self._stop.is_set():
+                self._log('\n(已停止)')
+                break
             self.progress_cb(idx, len(names), name, 'running')
+            t0 = time.time()
             ok = self.process_one(name, before_set)
             results[name] = ok
+            self._per_name_time[name] = time.time() - t0
             self.progress_cb(idx, len(names), name, 'ok' if ok else 'fail')
             time.sleep(T_BETWEEN_NAMES)
 
@@ -317,7 +349,35 @@ class BatchRunner:
         self._log(f'\n===== 结果: 成功{len(ok_names)} 失败{len(fail_names)} =====')
         if fail_names:
             self._log('失败: ' + ', '.join(fail_names))
+        # 写 run_log.csv (成功/失败、耗时、时间戳)
+        try:
+            self._write_run_log(outdir, names, results, run_start)
+        except Exception as ex:
+            self._log(f'写run_log失败: {ex}')
         return results
+
+    def _write_run_log(self, outdir, names, results, run_start):
+        """把本次批量结果写入 run_log.csv (成功/失败、耗时、时间戳)
+        同一目录多次跑 append 到同一文件, 用时间戳区分。"""
+        import csv as _csv
+        log_path = os.path.join(outdir, 'run_log.csv')
+        is_new = not os.path.exists(log_path)
+        total_time = time.time() - run_start
+        rows = []
+        for name in names:
+            ok = results.get(name, False)
+            rows.append({
+                '时间戳': time.strftime('%Y-%m-%d %H:%M:%S'),
+                '名字': name,
+                '结果': '成功' if ok else '失败',
+                '耗时(秒)': round(self._per_name_time.get(name, 0), 1),
+            })
+        with open(log_path, 'a', newline='', encoding='utf-8-sig') as f:
+            w = _csv.DictWriter(f, fieldnames=['时间戳', '名字', '结果', '耗时(秒)'])
+            if is_new:
+                w.writeheader()
+            w.writerows(rows)
+        self._log(f'📄 已写入日志: {log_path}  (本次{len(rows)}条, 总耗时{round(total_time,1)}s)')
 
 
 # ------------------------------------------------------------------ 界面
@@ -369,6 +429,16 @@ class App:
                             font=('Microsoft YaHei', 10, 'bold'), padding=(14, 7))
             style.map('Stop.TButton',
                       background=[('active', '#c0392b'), ('pressed', '#b03a2e'), ('disabled', '#d8bfbc')])
+            # 重跑按钮(橙)
+            style.configure('Rerun.TButton', background='#f39c12', foreground='white',
+                            font=('Microsoft YaHei', 10, 'bold'), padding=(14, 7))
+            style.map('Rerun.TButton',
+                      background=[('active', '#e67e22'), ('pressed', '#d35400'), ('disabled', '#e8d5b8')])
+            # 暂停按钮(蓝灰)
+            style.configure('Pause.TButton', background='#8e8ea0', foreground='white',
+                            font=('Microsoft YaHei', 10, 'bold'), padding=(14, 7))
+            style.map('Pause.TButton',
+                      background=[('active', '#6e6e80'), ('pressed', '#5a5a6a'), ('disabled', '#c6c6d0')])
             # 进度条
             style.configure('Highlight.Horizontal.TProgressbar',
                             troughcolor='#e0e0e0', background=ok_green, thickness=22)
@@ -432,6 +502,10 @@ class App:
 
         self.name_box = tk.Text(card2, height=5, font=('Consolas', 10), bg='#ffffff', relief='solid', bd=1)
         self.name_box.pack(fill='x', padx=12, pady=(0,10))
+        # 高亮样式: 运行中(黄底黑字) / 成功(浅绿) / 失败(浅红)
+        self.name_box.tag_configure('hl_run', background='#fff3cd', foreground='#856404')
+        self.name_box.tag_configure('hl_ok', background='#d4edda', foreground='#155724')
+        self.name_box.tag_configure('hl_fail', background='#f8d7da', foreground='#721c24')
 
         # ============ 卡片③ 输出与导出 ============
         card3 = ttk.Labelframe(left, text='输出与导出', style='Card.TLabelframe')
@@ -443,6 +517,13 @@ class App:
         self.outdir_var = tk.StringVar(value=DEFAULT_OUTDIR)
         ttk.Entry(row, textvariable=self.outdir_var).pack(side='left', fill='x', expand=True, padx=(0,5))
         ttk.Button(row, text='浏览', command=self.pick_dir).pack(side='left')
+
+        # 项目名 (用于「项目+时间」自动归档)
+        ttk.Label(card3, text='项目名 (选填; 填了则自动归档到 输出目录/项目名_日期/)').pack(anchor='w', padx=12, pady=(6,2))
+        proj_row = ttk.Frame(card3); proj_row.pack(fill='x', padx=12)
+        self.project_var = tk.StringVar()
+        ttk.Entry(proj_row, textvariable=self.project_var).pack(side='left', fill='x', expand=True, padx=(0,5))
+        ttk.Label(proj_row, text='如: 项目A_2026', foreground='#888888').pack(side='left')
 
         # 导出设置
         set_row = ttk.Frame(card3); set_row.pack(fill='x', padx=12, pady=6)
@@ -464,6 +545,14 @@ class App:
         self.start_btn.pack(side='left')
         self.stop_btn = ttk.Button(ctl, text='■ 停止', command=self.stop, state='disabled', style='Stop.TButton')
         self.stop_btn.pack(side='left', padx=8)
+        # 暂停/继续按钮 (运行中可用; 或按 Ctrl+P / 空格)
+        self.pause_btn = ttk.Button(ctl, text='⏸ 暂停', command=self.toggle_pause,
+                                    state='disabled', style='Pause.TButton')
+        self.pause_btn.pack(side='left', padx=(0,8))
+        # 失败一键重跑按钮 (跑完有失败时自动点亮)
+        self.rerun_btn = ttk.Button(ctl, text='↻ 重跑失败', command=self.rerun_failed,
+                                    state='disabled', style='Rerun.TButton')
+        self.rerun_btn.pack(side='left', padx=(0,8))
         self.prog_var = tk.StringVar(value='就绪')
         ttk.Label(ctl, textvariable=self.prog_var, font=('Microsoft YaHei', 9)).pack(side='left', padx=10)
 
@@ -498,6 +587,13 @@ class App:
         # 启动链接状态轮询
         self._polling = False
         self._start_link_polling()
+
+        # 暂停/继续热键: Ctrl+P 或 空格键 (运行中可用)
+        try:
+            self.root.bind('<Control-p>', lambda e: self._hotkey_toggle_pause())
+            self.root.bind('<space>', lambda e: self._hotkey_toggle_pause())
+        except Exception:
+            pass
 
     # ---- 设置持久化
     def _load_setting(self, key):
@@ -613,9 +709,15 @@ class App:
             "4. 开始批量\n"
             "   填好名字后点'▶ 开始批量', 逐条替换字幕文字并导出为 mp4。\n"
             "   文件按名字命名, 存到'输出目录'。\n\n"
-            "5. 自动执行\n"
+            "5. 项目名归档\n"
+            "   填了'项目名'后, 成片自动归档到 输出目录/项目名_日期/,\n"
+            "   同目录自动生成 run_log.csv (成功/失败、耗时、时间戳)。\n\n"
+            "6. 暂停/重跑\n"
+            "   运行中可点'⏸ 暂停'或按空格/Ctrl+P 临时暂停/继续。\n"
+            "   跑完若有失败, '↻ 重跑失败'按钮会点亮, 一键重试失败的名字。\n\n"
+            "7. 自动执行\n"
             "   勾选'打开草稿并选中后自动开始批量任务', 打开草稿成功即自动跑。\n\n"
-            "6. 完成后打开目录\n"
+            "8. 完成后打开目录\n"
             "   勾选后, 批量完整跑完自动弹出输出文件夹。\n\n"
             "小提示\n"
             "   - 请确保剪映专业版已打开、字幕条已就绪\n"
@@ -739,9 +841,15 @@ class App:
         """启动批量任务(供按钮与自动执行共用)。连接剪映放后台线程, 避免卡界面"""
         if not names:
             return
-        self._log(f'输出目录: {outdir}')
+        project = self.project_var.get().strip()
+        self._log(f'输出目录: {outdir}' + (f' | 项目: {project}' if project else ''))
         self._log(f'共{len(names)}个: {", ".join(names)}')
         self.start_btn.config(state='disabled'); self.stop_btn.config(state='normal')
+        if hasattr(self, 'rerun_btn'):
+            self.rerun_btn.config(state='disabled')
+        if hasattr(self, 'pause_btn'):
+            self.pause_btn.config(state='normal', text='⏸ 暂停')
+        self._running = True
         self.pbar.config(maximum=len(names), value=0)
         self.prog_var.set('启动中...')
         self._start_time = time.time()
@@ -749,10 +857,12 @@ class App:
         self.progress_text_var.set(f'准备中... (0/{len(names)})')
         self.time_var.set('')
         self._outdir = outdir
-        self._thread = threading.Thread(target=self._run_worker, args=(names,), daemon=True)
+        self._project = project
+        self._last_fail_names = []
+        self._thread = threading.Thread(target=self._run_worker, args=(names, project), daemon=True)
         self._thread.start()
 
-    def _run_worker(self, names):
+    def _run_worker(self, names, project=''):
         try:
             # 后台线程连接剪映(带超时, 避免UIA挂起)
             ctrl = connect_jianying_timeout(activate=True, timeout=6)
@@ -763,7 +873,7 @@ class App:
             self._runner = BatchRunner(ctrl, self._outdir,
                                        log_cb=self._log,
                                        progress_cb=self._on_progress)
-            results = self._runner.run(names)
+            results = self._runner.run(names, project)
         except Exception as ex:
             self._log(f'致命错误: {ex}')
             results = None
@@ -772,6 +882,9 @@ class App:
 
     def _finish(self, results, names):
         self.start_btn.config(state='normal'); self.stop_btn.config(state='disabled')
+        self._running = False
+        if hasattr(self, 'pause_btn'):
+            self.pause_btn.config(state='disabled', text='⏸ 暂停')
         # 判断是否完整跑完(非手动停止): 结果数==名字数
         completed = bool(results) and len(results) == len(names)
         self.prog_var.set('完成' if completed else '已停止')
@@ -780,9 +893,20 @@ class App:
             self.time_var.set(f'总用时 {self._fmt_time(used)}')
         else:
             self.time_var.set('')
-        # 勾选'完成后打开成品目录'且完整跑完时, 打开输出目录
+        # 记录失败名单, 有失败时点亮重跑按钮 + 提示音
+        self._last_fail_names = []
+        if results:
+            self._last_fail_names = [n for n, v in results.items() if not v]
+        if self._last_fail_names:
+            self.rerun_btn.config(state='normal')
+            self._play_beep('fail')
+            self._log(f'↻ 共{len(self._last_fail_names)}个失败, 可点"重跑失败"重新尝试')
+        elif completed:
+            self.rerun_btn.config(state='disabled')
+            self._play_beep('ok')
+        # 勾选'完成后打开成品目录'且完整跑完时, 打开实际输出目录(含归档子目录)
         if completed and self.open_dir_var.get():
-            outdir = self.outdir_var.get().strip() or DEFAULT_OUTDIR
+            outdir = self._runner._outdir_actual if (self._runner and hasattr(self._runner, '_outdir_actual')) else (self.outdir_var.get().strip() or DEFAULT_OUTDIR)
             if os.path.isdir(outdir):
                 try:
                     os.startfile(outdir)
@@ -790,9 +914,32 @@ class App:
                 except Exception as ex:
                     self._log(f'打开目录失败: {ex}')
 
+    def rerun_failed(self):
+        """一键重跑上次失败的名字 (契合先小批量试跑再全量的工作流)"""
+        if not self._last_fail_names:
+            messagebox.showinfo('重跑失败', '没有失败的名字可重跑')
+            return
+        # 重跑前把名字列表替换为失败名单, 便于用户看到在跑什么
+        self._set_names(self._last_fail_names)
+        self._log(f'↻ 重跑失败 {len(self._last_fail_names)} 个: {", ".join(self._last_fail_names)}')
+        self._start_run(self._last_fail_names, self.outdir_var.get().strip() or DEFAULT_OUTDIR)
+
+    def _play_beep(self, kind='ok'):
+        """提示音: ok=完成/成功, fail=有失败。用 winsound 标准库, 无声环境静默"""
+        try:
+            import winsound
+            if kind == 'fail':
+                winsound.MessageBeep(winsound.MB_ICONHAND)
+            else:
+                winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except Exception:
+            pass
+
     def _on_progress(self, idx, total, name, status):
         self.pbar.config(value=idx)
         pct = int(idx / total * 100) if total else 0
+        # 高亮当前处理行 (在名字列表里)
+        self._highlight_name(name, status)
         # 进度文字(醒目)
         if status == 'running':
             self.progress_text_var.set(f'▌处理中 {name}  ({idx}/{total} · {pct}%)')
@@ -807,6 +954,26 @@ class App:
             eta = used / idx * (total - idx)
             self.time_var.set(f'已用 {self._fmt_time(used)} · 预计剩余 {self._fmt_time(eta)}')
 
+    def _highlight_name(self, name, status):
+        """在名字列表里实时高亮当前处理的名字 (运行中=黄底, 成功=绿, 失败=红)"""
+        try:
+            self.name_box.tag_remove('hl_run', '1.0', 'end')
+            self.name_box.tag_remove('hl_ok', '1.0', 'end')
+            self.name_box.tag_remove('hl_fail', '1.0', 'end')
+            # 在文本里找该名字所在行(每行一个名字, 去空白)
+            target = name.strip()
+            content = self.name_box.get('1.0', 'end').split('\n')
+            for i, line in enumerate(content):
+                if line.strip() == target:
+                    start = f'{i+1}.0'
+                    end = f'{i+1}.end'
+                    tag = 'hl_run' if status == 'running' else ('hl_ok' if status == 'ok' else 'hl_fail')
+                    self.name_box.tag_add(tag, start, end)
+                    self.name_box.see(start)
+                    break
+        except Exception:
+            pass
+
     def _fmt_time(self, sec):
         """秒 -> mm:ss (或 hh:mm:ss)"""
         sec = max(0, int(sec))
@@ -819,6 +986,28 @@ class App:
     def stop(self):
         if self._runner: self._runner.stop()
         self.prog_var.set('正在停止...')
+
+    def toggle_pause(self):
+        """暂停/继续切换。后台线程在 run() 循环的 _pause.wait() 处阻塞。"""
+        runner = self._runner
+        if not runner or getattr(self, '_running', False) is False:
+            return
+        if runner.is_paused:
+            runner.pause()
+            self.pause_btn.config(text='▶ 继续')
+            self.prog_var.set('已暂停 (按空格/Ctrl+P 继续)')
+            self._log('⏸ 已暂停')
+        else:
+            runner.resume()
+            self.pause_btn.config(text='⏸ 暂停')
+            self.prog_var.set('继续中...')
+            self._log('▶ 已继续')
+
+    def _hotkey_toggle_pause(self):
+        """热键触发暂停: 仅在运行中且暂停按钮可用时生效"""
+        if getattr(self, '_running', False) and self.pause_btn.cget('state') != 'disabled':
+            self.toggle_pause()
+        return 'break'  # 阻止空格在文本框输入空格
 
     def _load_history(self):
         """从配置文件加载草稿名历史"""
