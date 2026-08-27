@@ -30,6 +30,27 @@ T_PASTE_WAIT = 0.35           # Ctrl+V 粘贴后
 T_CLIPBOARD = 0.15            # 写剪贴板后
 DEFAULT_OUTDIR = os.path.join(os.path.expanduser(r'~\Desktop'), '海外人名条')
 
+# ffmpeg 默认路径 (用于导出后转透明通道)。工具会先探测 PATH, 再试默认安装位置。
+FFMPEG_DEFAULT_PATHS = [
+    r'C:\ffmpeg\bin\ffmpeg.exe',
+    os.path.join(os.environ.get('PROGRAMFILES', ''), 'ffmpeg', 'bin', 'ffmpeg.exe'),
+]
+
+
+def detect_ffmpeg_path():
+    """自动探测 ffmpeg 路径: 先查 PATH, 再查常见安装位置。找不到返回空串。"""
+    import shutil as _sh
+    try:
+        p = _sh.which('ffmpeg')
+        if p:
+            return p
+    except Exception:
+        pass
+    for p in FFMPEG_DEFAULT_PATHS:
+        if p and os.path.isfile(p):
+            return p
+    return ''
+
 # 草稿名历史记录文件 (存到项目目录, 随工具迁移)
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.draft_history.json')
 MAX_HISTORY = 20  # 最多保留的历史条数
@@ -119,12 +140,15 @@ def click(x, y):
 
 class BatchRunner:
     """批量导出运行器(在后台线程跑, 界面用回调更新)"""
-    def __init__(self, ctrl, outdir, resolution=None, framerate=None, log_cb=None, progress_cb=None, dry_run=False):
+    def __init__(self, ctrl, outdir, resolution=None, framerate=None, log_cb=None, progress_cb=None, dry_run=False,
+                 transparent=False, ffmpeg_path=''):
         self.ctrl = ctrl
         self.outdir = outdir
         self.resolution = resolution
         self.framerate = framerate
         self.dry_run = dry_run
+        self.transparent = transparent   # 导出后是否转透明通道(ProRes 4444 MOV)
+        self.ffmpeg_path = ffmpeg_path   # ffmpeg 可执行文件路径
         self.log_cb = log_cb or (lambda *a: None)
         self.progress_cb = progress_cb or (lambda *a: None)
         self._stop = threading.Event()
@@ -132,6 +156,7 @@ class BatchRunner:
         self._pause.set()   # 默认不暂停
         self._per_name_time = {}   # 每个名字的耗时, 供 run_log 使用
         self._outdir_actual = outdir  # 实际落盘目录(含归档子目录), run 后更新
+        self._transparent_fails = 0   # 转透明失败计数
 
     def stop(self):
         self._stop.set()
@@ -313,6 +338,11 @@ class BatchRunner:
                 shutil.move(src, target)
             self._log(f'  -> {target}')
             before_set.discard(src)
+            # 若勾选转透明, 导出后把该 MP4 转成带透明通道的 MOV
+            if self.transparent:
+                ok_t = self._convert_transparent(target, name)
+                if not ok_t:
+                    self._transparent_fails += 1
             return True
         except Exception as ex:
             self._log(f'  移动失败:{ex}')
@@ -320,6 +350,40 @@ class BatchRunner:
             return False
 
     # ---- 干跑预览: 不操作剪映, 只模拟预览每个名字将如何处理
+    # ---- 转透明通道: 把已归置的 MP4 用 colorkey 抠黑转成 ProRes 4444 MOV
+    def _convert_transparent(self, mp4_path, name):
+        """把单个 MP4 转成带透明通道的 ProRes 4444 MOV (colorkey 抠黑底)。
+        成功返回 True; 失败返回 False。保留原 MP4。"""
+        ff = self.ffmpeg_path
+        if not ff:
+            ff = detect_ffmpeg_path()
+        if not ff or not os.path.isfile(ff):
+            self._log(f'  !!未找到 ffmpeg, 无法转透明 (已保留原MP4)')
+            return False
+        base, _ = os.path.splitext(mp4_path)
+        out_mov = base + '_透明.mov'   # 与 MP4 同名, 后缀区分
+        try:
+            import subprocess as _sp
+            # colorkey 抠纯黑 + ProRes 4444 带 alpha
+            r = _sp.run([ff, '-y', '-i', mp4_path,
+                         '-vf', 'colorkey=black:0.15:0.1,format=yuva444p10le',
+                         '-c:v', 'prores_ks', '-profile:v', '4',
+                         '-pix_fmt', 'yuva444p10le', '-an', out_mov],
+                        capture_output=True, text=True, timeout=180)
+            if r.returncode == 0 and os.path.exists(out_mov) and os.path.getsize(out_mov) > 0:
+                self._log(f'  ✦ 已转透明: {os.path.basename(out_mov)}')
+                return True
+            else:
+                self._log(f'  !!转透明失败: {name}')
+                # 清理可能残留的半成品
+                if os.path.exists(out_mov):
+                    try: os.remove(out_mov)
+                    except Exception: pass
+                return False
+        except Exception as ex:
+            self._log(f'  !!转透明异常: {ex}')
+            return False
+
     def _process_one_dry(self, name):
         issues = []
         # 输出路径检查
@@ -570,6 +634,19 @@ class App:
                        bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
                        font=('Microsoft YaHei', 9)).pack(side='left', padx=14)
 
+        # 导出后转透明通道 (第三版: 可选, 用 ffmpeg colorkey 抠黑转 ProRes 4444 MOV)
+        trans_row = ttk.Frame(card3); trans_row.pack(fill='x', padx=12, pady=(0,3))
+        self.transparent_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(trans_row, text='☑ 导出后转透明通道(MOV)', variable=self.transparent_var,
+                       bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
+                       font=('Microsoft YaHei', 9)).pack(side='left')
+        ttk.Label(trans_row, text='ffmpeg:', foreground='#888888').pack(side='left', padx=(8,3))
+        self.ffmpeg_var = tk.StringVar(value=detect_ffmpeg_path())
+        ttk.Entry(trans_row, textvariable=self.ffmpeg_var, width=22).pack(side='left', fill='x', expand=True, padx=(0,3))
+        ttk.Button(trans_row, text='浏览', command=self.pick_ffmpeg).pack(side='left')
+        # 提示: 透明转换对纯黑底素材效果最好; 带光晕/渐变的字幕条可能有边缘残留
+        ttk.Label(trans_row, text='(仅去纯黑底, 光晕字幕可能有残留)', foreground='#bbbbbb').pack(side='left', padx=4)
+
         # 配置备份/恢复 (第二版: 配置中心化)
         cfg_row = ttk.Frame(card3); cfg_row.pack(fill='x', padx=12, pady=(0,4))
         ttk.Label(cfg_row, text='配置').pack(side='left')
@@ -689,6 +766,8 @@ class App:
             'auto_run': bool(self.auto_run_var.get()),
             'resolution': self.res_var.get(),
             'framerate': self.fps_var.get(),
+            'transparent': bool(self.transparent_var.get()),
+            'ffmpeg_path': self.ffmpeg_var.get().strip(),
         }
 
     def _apply_settings(self, data):
@@ -703,6 +782,8 @@ class App:
             'auto_run': lambda v: self.auto_run_var.set(bool(v)),
             'resolution': lambda v: self.res_var.set(str(v)),
             'framerate': lambda v: self.fps_var.set(str(v)),
+            'transparent': lambda v: self.transparent_var.set(bool(v)),
+            'ffmpeg_path': lambda v: self.ffmpeg_var.set(str(v)),
         }
         for k, fn in mapping.items():
             if k in data:
@@ -1063,6 +1144,14 @@ class App:
         d = filedialog.askdirectory()
         if d: self.outdir_var.set(d)
 
+    def pick_ffmpeg(self):
+        """选择 ffmpeg 可执行文件 (用于导出后转透明通道)"""
+        p = filedialog.askopenfilename(
+            title='选择 ffmpeg.exe',
+            filetypes=[('ffmpeg', 'ffmpeg.exe'), ('可执行文件', '*.exe')])
+        if p:
+            self.ffmpeg_var.set(p)
+
     # ---- 控制
     def start(self):
         names = self._get_names()
@@ -1100,7 +1189,9 @@ class App:
         try:
             # 干跑不需要真实剪映连接; 用空 controller
             runner = BatchRunner(None, outdir, log_cb=self._log,
-                                 progress_cb=self._on_progress, dry_run=True)
+                                 progress_cb=self._on_progress, dry_run=True,
+                                 transparent=self.transparent_var.get(),
+                                 ffmpeg_path=self.ffmpeg_var.get().strip())
             results = runner.run(names, project)
         except Exception as ex:
             self._log(f'预览异常: {ex}')
@@ -1145,7 +1236,9 @@ class App:
                 return
             self._runner = BatchRunner(ctrl, self._outdir,
                                        log_cb=self._log,
-                                       progress_cb=self._on_progress)
+                                       progress_cb=self._on_progress,
+                                       transparent=self.transparent_var.get(),
+                                       ffmpeg_path=self.ffmpeg_var.get().strip())
             results = self._runner.run(names, project)
         except Exception as ex:
             self._log(f'致命错误: {ex}')
