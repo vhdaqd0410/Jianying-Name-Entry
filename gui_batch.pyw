@@ -28,6 +28,7 @@ T_BETWEEN_NAMES = 1.2         # 两个名字之间的间隔
 T_CLICK_TEXTBOX = 0.25        # 点击文本框后
 T_PASTE_WAIT = 0.35           # Ctrl+V 粘贴后
 T_CLIPBOARD = 0.15            # 写剪贴板后
+
 DEFAULT_OUTDIR = os.path.join(os.path.expanduser(r'~\Desktop'), '海外人名条')
 
 # ffmpeg 默认路径 (用于导出后转透明通道)。工具会先探测 PATH, 再试默认安装位置。
@@ -128,7 +129,9 @@ def set_clipboard(text):
     time.sleep(T_CLIPBOARD)
 
 def key(vk):
-    user32.keybd_event(vk, 0, 0, 0); user32.keybd_event(vk, 0, 2, 0)
+    # 带扫描码的键盘事件: 剪映等现代编辑器对扫描码=0的合成按键可能不响应
+    scan = user32.MapVirtualKeyW(vk, 0)
+    user32.keybd_event(vk, scan, 0, 0); user32.keybd_event(vk, scan, 2, 0)
 
 def ctrl_key(vk):
     user32.keybd_event(0x11, 0, 0, 0); key(vk); user32.keybd_event(0x11, 0, 2, 0)
@@ -216,8 +219,10 @@ class BatchRunner:
         return None
 
     def set_name(self, name, edit_ctrl):
-        """用真实键盘输入替换文字: 点击文本框→全选→删除→粘贴。
+        """用真实键盘替换文字: 点击文本框→全选→直接粘贴(不删除)。
         剪映认的是真实编辑(会提交到时间线素材), SetValue只是UIA显示层假替换。
+        关键: 全选后直接 Ctrl+V 粘贴(不按 Delete), 剪映用“替换选中文本”语义保留字体格式;
+        若先 Delete 删除再粘贴, 段落格式丢失、新文字套默认字体。
         替换后重试读回验证, 确认文字真的被替换才返回True。"""
         # 取文本框中心坐标
         try:
@@ -226,10 +231,9 @@ class BatchRunner:
         except Exception as ex:
             self._log(f'  取文本框坐标失败:{ex}')
             return False
-        # 真实键盘输入
+        # 真实键盘输入: 全选→直接粘贴(不删除, 保留字体)
         click(cx, cy); time.sleep(T_CLICK_TEXTBOX)
-        ctrl_key(0x41); time.sleep(0.25)   # Ctrl+A 全选
-        key(0x2E); time.sleep(0.15)         # Delete 删除
+        ctrl_key(0x41); time.sleep(0.25)   # Ctrl+A 全选 (不按Delete, 直接粘贴覆盖选中文本)
         set_clipboard(name)
         ctrl_key(0x56); time.sleep(T_PASTE_WAIT)   # Ctrl+V 粘贴
         time.sleep(0.3)

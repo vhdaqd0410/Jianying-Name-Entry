@@ -1,24 +1,23 @@
 @echo off
-chcp 65001 >nul
 rem ====================================================
-rem  æµ·å¤–äººåæ¡æ‰¹é‡ç”Ÿæˆ - å¯åŠ¨å™¨
-rem  åŒå‡»æ­¤æ–‡ä»¶æ‰“å¼€ç•Œé¢
+rem  º£ÍâÈËÃûÌõÅúÁ¿Éú³É - Æô¶¯Æ÷
+rem  Ë«»÷´ËÎÄ¼þ´ò¿ª½çÃæ (GBK ±àÂë, cmd ¿ÉÖ±½ÓÊ¶±ð)
 rem ====================================================
 set "SCRIPT_DIR=%~dp0"
 set "PYW=pythonw.exe"
 
-rem ä¼˜å…ˆä½¿ç”¨æœ¬ç›®å½• venvï¼ˆè‹¥å­˜åœ¨ï¼‰ï¼Œå¦åˆ™ç”¨ç³»ç»Ÿ pythonw
+rem ÓÅÏÈÊ¹ÓÃ±¾Ä¿Â¼ venv, ·ñÔòÓÃÏµÍ³ pythonw
 if exist "%SCRIPT_DIR%\.venv\Scripts\pythonw.exe" (
     set "PYW=%SCRIPT_DIR%\.venv\Scripts\pythonw.exe"
 )
 
-rem æ£€æŸ¥ä¾èµ–æ˜¯å¦å·²å®‰è£…
+rem ¼ì²éÒÀÀµÊÇ·ñÒÑ°²×°
 "%PYW%" -c "import uiautomation, tkinter" >nul 2>&1
 if errorlevel 1 (
-    echo [æç¤º] é¦–æ¬¡è¿è¡Œéœ€è¦å®‰è£…ä¾èµ–: uiautomation
-    echo è¯·åœ¨å‘½ä»¤è¡Œè¿è¡Œ:  pip install -r "%SCRIPT_DIR%requirements.txt"
+    echo [ÌáÊ¾] Ê×´ÎÔËÐÐÐèÒª°²×°ÒÀÀµ: uiautomation
+    echo ÇëÔÚÃüÁîÐÐÔËÐÐ:  pip install -r "%SCRIPT_DIR%requirements.txt"
     echo.
-    echo æŒ‰ä»»æ„é”®é€€å‡º...
+    echo °´ÈÎÒâ¼üÍË³ö...
     pause >nul
     exit /b 1
 )
