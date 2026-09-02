@@ -246,14 +246,24 @@ class BatchRunner:
         self._log(f'  !!替换后读回未确认到 {name} (读回{tb[0] if tb else "无"!r})')
         return False
 
-    def desktop_exports(self):
-        return glob.glob(os.path.join(os.path.expanduser(r'~\Desktop'), '海外人名条*.mp4'))
+    def _scan_exports(self):
+        """扫描所有可能产生导出文件的目录: 桌面(默认导出位置) + 输出目录。
+        这样剪映无论导出到桌面还是直接把导出路径设为输出目录, 都能找到新文件。
+        只匹配 海外人名条*.mp4 (剪映导出文件名前缀), 输出目录里已重命名的 名字.mp4 不干扰。"""
+        dirs = [os.path.expanduser(r'~\Desktop')]
+        for d in (self.outdir, getattr(self, '_outdir_actual', None)):
+            if d and d not in dirs and os.path.isdir(d):
+                dirs.append(d)
+        found = set()
+        for d in dirs:
+            found.update(glob.glob(os.path.join(d, '海外人名条*.mp4')))
+        return found
 
     def wait_new_export(self, before_set, timeout=120):
         t0 = time.time()
         while time.time() - t0 < timeout:
             if self._stop.is_set(): return None
-            cur = set(self.desktop_exports())
+            cur = self._scan_exports()
             new = cur - before_set
             if new: return list(new)[0]
             time.sleep(0.5)
@@ -415,7 +425,7 @@ class BatchRunner:
                 outdir = os.path.join(self.outdir, archive_sub)
         os.makedirs(outdir, exist_ok=True)
         self._outdir_actual = outdir
-        before_set = set(self.desktop_exports())
+        before_set = self._scan_exports()
         results = {}
         run_start = time.time()
         for idx, name in enumerate(names, 1):
