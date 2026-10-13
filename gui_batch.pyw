@@ -163,6 +163,16 @@ def click(x, y):
 DEFAULT_FINAL_ROOT = r'O:\AI漫剧剪辑一组'
 FINAL_SUBDIR = '人名条'   # 项目目录内的子文件夹名(成片剪切到里面)
 
+# 同名冲突策略: 界面显示名 -> 内部值 (顺序即下拉框顺序)
+CONFLICT_LABELS = {
+    '询问': 'ask',
+    '覆盖': 'overwrite',
+    '自动改名': 'rename',
+    '跳过': 'skip',
+}
+FROM_CONFLICT_VALUE = {v: k for k, v in CONFLICT_LABELS.items()}
+DEFAULT_CONFLICT_LABEL = '询问'   # 默认策略: 现场询问
+
 
 def norm_title(s: str) -> str:
     """把剧名/文件夹名归一化成可比较的形式:
@@ -243,7 +253,7 @@ class BatchRunner:
     """批量导出运行器(在后台线程跑, 界面用回调更新)"""
     def __init__(self, ctrl, outdir, resolution=None, framerate=None, log_cb=None, progress_cb=None, dry_run=False,
                  transparent=False, ffmpeg_path='', final_root='', final_title='', final_subdir=FINAL_SUBDIR,
-                 final_move=True):
+                 final_move=True, conflict_policy='ask', conflict_cb=None):
         self.ctrl = ctrl
         self.outdir = outdir
         self.resolution = resolution
@@ -255,10 +265,13 @@ class BatchRunner:
         self.final_title = (final_title or '').strip()    # 剧名, 用于匹配项目文件夹
         self.final_subdir = (final_subdir or FINAL_SUBDIR).strip()  # 项目内子文件夹名
         self.final_move = bool(final_move)  # True=剪切(移动), False=复制留原件
+        self.conflict_policy = conflict_policy or 'ask'   # 同名冲突: ask/overwrite/rename/skip
+        self.conflict_cb = conflict_cb      # 询问回调(conflicts)->策略; 主线程弹窗
+        self._produced = []             # 本次运行产生的文件(仅这些会被投送)
         self._archive_sub = ''          # 项目归档子目录名(如 项目A_20260902), run 后更新
         self._final_project = None      # 解析出的项目文件夹名
         self._final_dir = ''            # 解析出的最终落盘目录(项目\人名条)
-        self._final_moved = 0           # 成功剪切到最终位置的次数
+        self._final_moved = 0           # 成功投送到最终位置的次数
         self.log_cb = log_cb or (lambda *a: None)
         self.progress_cb = progress_cb or (lambda *a: None)
         self._stop = threading.Event()
@@ -467,8 +480,8 @@ class BatchRunner:
                     produced.append(os.path.splitext(target)[0] + '_透明.mov')
                 else:
                     self._transparent_fails += 1
-            # 设置过"最终位置"则把成片剪切/复制过去(输出目录原件默认剪切走)
-            self._deliver_final(produced)
+            # 仅登记产物, 不搬; 整批输出完成后由 deliver_all() 统一投送
+            self._produced.extend(produced)
             return True
         except Exception as ex:
             self._log(f'  移动失败:{ex}')
@@ -502,38 +515,123 @@ class BatchRunner:
         return d
 
     def _deliver_final(self, files):
-        """把已归置的成片(含转透明产物)剪切/复制到最终目录。
-        原件默认剪切走(移动); final_move=False 时保留原件只复制。
-        同名不覆盖, 自动加 (1); 失败只记日志, 不影响本条结果。"""
-        dst_dir = self.resolve_final_dir()
-        if not dst_dir:
-            return
-        for src in files:
-            if not src or not os.path.exists(src):
+        """[旧接口, 保留兼容] 单次投递, 不询问。"""
+        self._produced.extend(files)
+        self.deliver_all()
+
+    def deliver_all(self, names_for_match=None):
+        """整批输出全部结束后, 统一把本次产物投送到最终目录。
+
+        只搬 self._produced 里显式登记的文件(本次运行真正生成的),
+        绝不扫描目录, 因此输出目录里的其它文件不会被误搬。
+        同名冲突按 conflict_policy 处理: overwrite / rename / skip / ask。
+        返回统计 dict。"""
+        stat = {'moved': 0, 'overwritten': 0, 'renamed': 0, 'skipped': 0, 'failed': 0, 'aborted': False}
+        if not self.final_root:
+            return stat
+        # 只留真实存在且确实位于本次输出目录内的文件
+        out_root = os.path.abspath(self._outdir_actual)
+        files, seen = [], set()
+        for p in self._produced:
+            if not p:
                 continue
+            ap = os.path.abspath(p)
+            if ap in seen or not os.path.isfile(ap):
+                continue
+            if not ap.lower().startswith(out_root.lower() + os.sep):
+                self._log(f'!!跳过非本次输出文件: {ap}')
+                continue
+            seen.add(ap); files.append(ap)
+        if not files:
+            self._log('\n(无可投送的产物)')
+            return stat
+
+        dst_dir = self.resolve_final_dir(names_for_match)
+        if not dst_dir:
+            # 定位失败: 文件全部留在输出目录, 不乱放
+            self._log(f'\n未定位到项目文件夹, {len(files)} 个文件保留在输出目录')
+            return stat
+
+        self._log(f'\n===== 输出完成, 开始投送到最终目录 ({len(files)} 个文件) =====')
+        # 先算同名冲突
+        plan = []
+        conflicts = []
+        for src in files:
             base = os.path.basename(src)
-            stem, ext = os.path.splitext(base)
             dst = os.path.join(dst_dir, base)
             if os.path.exists(dst):
+                conflicts.append((src, dst))
+            plan.append((src, dst, os.path.exists(dst)))
+
+        policy = self.conflict_policy or 'rename'
+        if conflicts:
+            self._log(f'同名冲突 {len(conflicts)} 个: ' +
+                      ', '.join(os.path.basename(d) for _, d in conflicts[:6]) +
+                      ('...' if len(conflicts) > 6 else ''))
+            if policy == 'ask':
+                if self.conflict_cb:
+                    ans = self.conflict_cb(conflicts) or 'cancel'
+                    self._log(f'用户选择: {ans}')
+                else:
+                    ans = 'skip'   # 无弹窗回调时宁可不动, 绝不默认覆盖
+                    self._log('(无法弹窗询问, 改为跳过同名文件)')
+                if ans == 'cancel':
+                    self._log('已取消投送, 文件全部保留在输出目录')
+                    stat['aborted'] = True
+                    return stat
+                policy = ans
+        else:
+            self._log('无同名冲突')
+
+        # 执行
+        for src, dst, existed in plan:
+            base = os.path.basename(src)
+            if existed and policy == 'skip':
+                self._log(f'  - 跳过(已存在): {base}')
+                stat['skipped'] += 1
+                continue
+            target = dst
+            if existed and policy == 'rename':
+                stem, ext = os.path.splitext(base)
                 for i in range(1, 100):
                     cand = os.path.join(dst_dir, f'{stem}({i}){ext}')
                     if not os.path.exists(cand):
-                        dst = cand
+                        target = cand
                         break
             try:
+                if existed and policy == 'overwrite':
+                    # 先删目标再搬: 跨盘时 shutil.move 到已存在文件在部分文件系统上会失败
+                    try:
+                        os.remove(target)
+                    except Exception:
+                        pass
                 if self.final_move:
-                    # 同盘用原子 replace; 跨盘(如 C盘输出 → O盘最终)用 shutil.move(copy+delete)
-                    if os.path.splitdrive(src)[0].lower() == os.path.splitdrive(dst)[0].lower():
-                        os.replace(src, dst)
+                    if os.path.splitdrive(src)[0].lower() == os.path.splitdrive(target)[0].lower():
+                        os.replace(src, target)
                     else:
-                        shutil.move(src, dst)
-                    self._log(f'  ⇢ 已剪切到最终位置: {dst}')
+                        shutil.move(src, target)
+                    verb = '剪切'
                 else:
-                    shutil.copy2(src, dst)
-                    self._log(f'  ⇢ 已复制到最终位置: {dst}')
+                    shutil.copy2(src, target)
+                    verb = '复制'
+                if existed:
+                    if policy == 'overwrite':
+                        stat['overwritten'] += 1
+                        self._log(f'  ⇢ 已{verb}(覆盖同名): {os.path.basename(target)}')
+                    else:
+                        stat['renamed'] += 1
+                        self._log(f'  ⇢ 已{verb}(改名避让): {os.path.basename(target)}')
+                else:
+                    stat['moved'] += 1
+                    self._log(f'  ⇢ 已{verb}: {os.path.basename(target)}')
                 self._final_moved += 1
             except Exception as ex:
-                self._log(f'  !!送往最终位置失败({base}): {ex}')
+                stat['failed'] += 1
+                self._log(f'  !!投送失败({base}): {ex}')
+
+        self._log(f'投送完成: 新搬{stat["moved"]} 覆盖{stat["overwritten"]} '
+                  f'改名{stat["renamed"]} 跳过{stat["skipped"]} 失败{stat["failed"]}')
+        return stat
 
     # ---- 干跑预览: 不操作剪映, 只模拟预览每个名字将如何处理
     # ---- 转透明通道: 把已归置的 MP4 用 colorkey 抠黑转成 ProRes 4444 MOV
@@ -583,8 +681,7 @@ class BatchRunner:
             self._log('  ' + '; '.join(issues))
         self._log(f'  [预览] 将导出 → {target}')
         if self.final_root:
-            fd = self._final_dir or '(运行开始时自动定位)'
-            self._log(f'  [预览] 将{"剪切" if self.final_move else "复制"}到最终位置 → {fd}')
+            self._log(f'  [预览] 全部导出完成后统一剪切到最终位置 → {self._final_dir or "(运行开始时自动定位)"}')
         return True
 
     # ---- 批量入口
@@ -632,11 +729,13 @@ class BatchRunner:
         if not self.dry_run:
             try:
                 log_path = self._write_run_log(outdir, names, results, run_start)
-                # 最终位置若启用, 把 run_log.csv 一并送过去
-                if self.final_root and log_path and os.path.exists(log_path):
-                    self._deliver_final([log_path])
+                # run_log 也作为本次产物, 随成片一起投送
+                if log_path and os.path.exists(log_path):
+                    self._produced.append(log_path)
             except Exception as ex:
                 self._log(f'写run_log失败: {ex}')
+            # 整批输出已全部完成, 现在才统一投送到最终目录
+            self.deliver_all(names)
         else:
             ok_names = [n for n, v in results.items() if v]
             self._log(f'\n[预览结束] 共{len(names)}个, 均可正常导出 (可开始正式批量)')
@@ -839,8 +938,18 @@ class App:
                        font=('Microsoft YaHei', 9)).pack(side='left')
         # 匹配预览按钮: 不改任何文件, 只报将要送到哪里
         ttk.Button(fin_row2, text='匹配预览', command=self.preview_final_match).pack(side='left', padx=(6,0))
+
+        # 同名处理 + 投送时机说明
+        fin_row3 = ttk.Frame(card3); fin_row3.pack(fill='x', padx=12, pady=(4,0))
+        ttk.Label(fin_row3, text='同名处理').pack(side='left')
+        self.conflict_var = tk.StringVar(value=DEFAULT_CONFLICT_LABEL)
+        ttk.Combobox(fin_row3, textvariable=self.conflict_var, values=list(CONFLICT_LABELS),
+                     state='readonly', width=8).pack(side='left', padx=(3,10))
+        ttk.Label(fin_row3, text='（最终目录已有同名文件时怎么处理）', foreground='#888888').pack(side='left')
         ttk.Label(card3, text='   导入CSV时会自动用文件名填剧名; “匹配预览”先看看能定位到哪个项目文件夹',
-                  foreground='#888888').pack(anchor='w', padx=12, pady=(1,4))
+                  foreground='#888888').pack(anchor='w', padx=12, pady=(1,1))
+        ttk.Label(card3, text='   投送时机: 全部导出完成后统一剪切（输出目录里的其它文件不会被搬）',
+                  foreground='#888888').pack(anchor='w', padx=12, pady=(0,4))
 
         # 导出设置
         set_row = ttk.Frame(card3); set_row.pack(fill='x', padx=12, pady=6)
@@ -987,6 +1096,7 @@ class App:
             'final_title': self.final_title_var.get().strip(),
             'final_subdir': self.final_subdir_var.get().strip(),
             'final_move': bool(self.final_move_var.get()),
+            'final_conflict': self._conflict_policy(),
             'project': self.project_var.get().strip(),
             'open_dir': bool(self.open_dir_var.get()),
             'auto_run': bool(self.auto_run_var.get()),
@@ -1007,6 +1117,7 @@ class App:
             'final_title': lambda v: self.final_title_var.set(str(v)),
             'final_subdir': lambda v: self.final_subdir_var.set(str(v)),
             'final_move': lambda v: self.final_move_var.set(bool(v)),
+            'final_conflict': lambda v: self.conflict_var.set(FROM_CONFLICT_VALUE.get(str(v), '询问')),
             'project': lambda v: self.project_var.set(str(v)),
             'open_dir': lambda v: self.open_dir_var.set(bool(v)),
             'auto_run': lambda v: self.auto_run_var.set(bool(v)),
@@ -1255,6 +1366,10 @@ class App:
             "   - 剧名: 导入CSV/TXT时自动用文件名填入, 也可手改\n"
             "   - 子文件夹: 默认“人名条”, 可改成别的名字\n"
             "   - 剪切: 默认勾选(输出目录不留原件); 不勾则只复制\n"
+            "   - 投送时机: 全部导出完成后统一剪切, 不是出一条剪一条;\n"
+            "     只搬本次生成的成片与 run_log, 输出目录里的其它文件不会被碰\n"
+            "   - 同名处理: 最终目录已有同名文件时的做法\n"
+            "     询问(默认, 弹窗让你现场选) / 覆盖 / 自动改名 / 跳过\n"
             "   - 匹配预览: 先看看能定位到哪个项目文件夹, 不改任何文件\n"
             "   匹配失败时不会乱放, 成片留在输出目录并写日志。\n\n"
             "7. 暂停/重跑\n"
@@ -1402,6 +1517,72 @@ class App:
         d = filedialog.askdirectory()
         if d: self.outdir_var.set(d)
 
+    def _conflict_policy(self):
+        """界面上的“同名处理”选择 -> 策略值"""
+        return CONFLICT_LABELS.get(self.conflict_var.get(), 'ask')
+
+    def _ask_conflict(self, conflicts):
+        """工作线程调用: 转到主线程弹窗询问同名处理方式。
+        返回 overwrite / rename / skip / cancel。"""
+        holder, ev = {}, threading.Event()
+
+        def show():
+            try:
+                holder['ans'] = self._conflict_dialog(conflicts)
+            except Exception:
+                holder['ans'] = 'cancel'
+            finally:
+                ev.set()
+
+        try:
+            self.root.after(0, show)
+        except Exception:
+            return 'cancel'
+        ev.wait(timeout=900)   # 等用户拍板(最长15分钟)
+        return holder.get('ans', 'cancel')
+
+    def _conflict_dialog(self, conflicts):
+        """主线程上的同名冲突对话框(四个选项)"""
+        top = tk.Toplevel(self.root)
+        top.title('最终目录有同名文件')
+        top.transient(self.root)
+        top.resizable(False, False)
+        ans = {'v': 'cancel'}
+        ttk.Label(top, text=f'最终目录里已有 {len(conflicts)} 个同名文件:',
+                  font=('Microsoft YaHei', 10, 'bold')).pack(anchor='w', padx=14, pady=(12, 4))
+        box = tk.Text(top, height=min(8, max(3, len(conflicts))), width=48,
+                      font=('Consolas', 9), relief='solid', bd=1)
+        box.pack(padx=14)
+        for _, d in conflicts[:80]:
+            box.insert('end', os.path.basename(d) + '\n')
+        if len(conflicts) > 80:
+            box.insert('end', f'... 共 {len(conflicts)} 个\n')
+        box.config(state='disabled')
+        ttk.Label(top, text='覆盖=新文件替掉旧的；自动改名=新文件存为 xxx(1)；跳过=旧文件不动、这几个不投送',
+                  foreground='#888888').pack(anchor='w', padx=14, pady=(6, 0))
+        row = ttk.Frame(top); row.pack(padx=14, pady=12)
+
+        def pick(v):
+            ans['v'] = v
+            top.destroy()
+
+        ttk.Button(row, text='覆盖', command=lambda: pick('overwrite')).pack(side='left')
+        ttk.Button(row, text='自动改名', command=lambda: pick('rename')).pack(side='left', padx=6)
+        ttk.Button(row, text='跳过这些', command=lambda: pick('skip')).pack(side='left')
+        ttk.Button(row, text='取消投送', command=lambda: pick('cancel')).pack(side='left', padx=(6, 0))
+        top.protocol('WM_DELETE_WINDOW', lambda: pick('cancel'))
+        try:
+            top.update_idletasks()
+            x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - top.winfo_width()) // 2)
+            y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - top.winfo_height()) // 3)
+            top.geometry(f'+{x}+{y}')
+            top.grab_set()
+            top.focus_force()
+        except Exception:
+            pass
+        top.wait_window()
+        return ans['v']
+
     def pick_final_root(self):
         """选择最终位置根目录 (如 O:\\AI漫剧剪辑一组)"""
         d = filedialog.askdirectory(title='选择最终位置根目录 (其下是各项目文件夹)')
@@ -1486,7 +1667,8 @@ class App:
                                  final_root=self.final_root_var.get(),
                                  final_title=self.final_title_var.get(),
                                  final_subdir=self.final_subdir_var.get(),
-                                 final_move=self.final_move_var.get())
+                                 final_move=self.final_move_var.get(),
+                                 conflict_policy=self._conflict_policy())
             results = runner.run(names, project)
         except Exception as ex:
             self._log(f'预览异常: {ex}')
@@ -1537,7 +1719,9 @@ class App:
                                        final_root=self.final_root_var.get(),
                                        final_title=self.final_title_var.get(),
                                        final_subdir=self.final_subdir_var.get(),
-                                       final_move=self.final_move_var.get())
+                                       final_move=self.final_move_var.get(),
+                                       conflict_policy=self._conflict_policy(),
+                                       conflict_cb=self._ask_conflict)
             results = self._runner.run(names, project)
         except Exception as ex:
             self._log(f'致命错误: {ex}')

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """界面级验证: 最终位置控件 + 配置持久化 + 导入CSV自动填剧名。"""
-import sys, os, json, tempfile, shutil, importlib.util, types
+import sys, os, json, time, tempfile, shutil, threading, importlib.util, types
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 if 'uiautomation' not in sys.modules:
     stub = types.ModuleType('uiautomation')
@@ -12,6 +12,7 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 项目根
 spec = importlib.util.spec_from_file_location('gb', os.path.join(HERE, 'gui_batch.pyw'))
 gb = importlib.util.module_from_spec(spec); spec.loader.exec_module(gb)
 import tkinter as tk
+from tkinter import ttk
 
 fails = []
 def ck(n, c, e=''):
@@ -85,6 +86,87 @@ ck('subdir 透传', r.final_subdir == '人名条')
 ck('剪切开关透传', r.final_move is True)
 r2 = gb.BatchRunner(None, tmp, log_cb=lambda *a: None)
 ck('不设最终位置时不动作', r2.resolve_final_dir(['a']) == '')
+
+print('--- 同名处理控件与询问 ---')
+ck('同名处理控件存在', hasattr(app, 'conflict_var'))
+ck('默认=询问', app.conflict_var.get() == '询问', app.conflict_var.get())
+for label, val in gb.CONFLICT_LABELS.items():
+    app.conflict_var.set(label)
+    ck(f'{label} -> {val}', app._conflict_policy() == val, app._conflict_policy())
+# 配置持久化
+app.final_root_var.set(r'O:\AI漫剧剪辑一组')
+app.conflict_var.set('覆盖')
+d2 = app._collect_settings()
+ck('_collect_settings 含 final_conflict', d2.get('final_conflict') == 'overwrite', d2.get('final_conflict'))
+app._save_all_settings()
+sv = json.load(open(gb.SETTINGS_FILE, encoding='utf-8'))
+ck('config.json 存了 final_conflict', sv.get('final_conflict') == 'overwrite', sv.get('final_conflict'))
+app.conflict_var.set('询问')
+app._apply_settings(sv)
+ck('读回后=覆盖', app.conflict_var.get() == '覆盖', app.conflict_var.get())
+
+# 真实对话框: 反复尝试点击按钮(带超时兜底, 避免测试挂死)
+def _find_dialog():
+    for w in app.root.winfo_children():
+        if isinstance(w, tk.Toplevel) and w.title() == '最终目录有同名文件':
+            return w
+    return None
+
+
+def _walk(x):
+    for c in x.winfo_children():
+        yield c
+        yield from _walk(c)
+
+
+def click_when_ready(text, tries=50):
+    """轮询等对话框出现并点下指定按钮; 超时则强制关闭。"""
+    def attempt(n):
+        w = _find_dialog()
+        if w is not None:
+            for c in _walk(w):
+                try:
+                    txt = c.cget('text')
+                except tk.TclError:
+                    continue
+                if isinstance(c, ttk.Button) and str(txt) == text:
+                    c.invoke()
+                    return
+        if n > 0:
+            app.root.after(100, lambda: attempt(n - 1))
+        else:
+            print(f'  !! 点击「{text}」超时, 强制关闭对话框')
+            w2 = _find_dialog()
+            if w2 is not None:
+                app.root.update()
+                w2.destroy()
+    attempt(tries)
+
+
+app.root.after(200, lambda: click_when_ready('覆盖'))
+val = app._conflict_dialog([('/s/a.mp4', '/d/a.mp4')])
+ck('对话框点“覆盖”返回 overwrite', val == 'overwrite', val)
+app.root.after(200, lambda: click_when_ready('取消投送'))
+val2 = app._conflict_dialog([('/s/a.mp4', '/d/a.mp4'), ('/s/b.mp4', '/d/b.mp4')])
+ck('对话框点“取消投送”返回 cancel', val2 == 'cancel', val2)
+
+# 跨线程询问: 工作线程发起, 主线程真实 mainloop 回应(与运行时一致)
+gb_orig = app._conflict_dialog
+app._conflict_dialog = lambda c: 'skip'
+holder = {}
+
+def worker():
+    holder['v'] = app._ask_conflict([('/s/a.mp4', '/d/a.mp4')])
+    try:
+        app.root.after(0, app.root.quit)
+    except Exception:
+        pass
+
+app.root.after(200, lambda: threading.Thread(target=worker, daemon=True).start())
+app.root.after(15000, app.root.quit)   # 兜底, 避免测试挂死
+app.root.mainloop()
+ck('工作线程能拿到询问答复', holder.get('v') == 'skip', holder.get('v'))
+app._conflict_dialog = gb_orig
 
 print('--- 可写目录解析(冻结/非冻结) ---')
 ck('非冻结时=源码目录', gb.app_dir() == HERE, gb.app_dir())
