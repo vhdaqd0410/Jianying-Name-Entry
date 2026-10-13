@@ -23,10 +23,18 @@ def app_dir():
     """可写数据的存放目录(配置/模板/草稿历史)。
 
     打包后 __file__ 指向 _MEIPASS 临时解包目录, 写在那里程序一退就被删,
-    设置存不住。因此冻结运行时用 exe 自身所在目录(便携, 用户看得到、好备份)。
+    设置存不住。因此:
+      - 冻结(exe)运行: %APPDATA%\\JianyingNameEntry\\  (不往 exe 旁边/桌面据文件)
+      - 源码运行: 项目目录 (保持原有习惯)
     """
     if getattr(sys, 'frozen', False):
-        return os.path.dirname(os.path.abspath(sys.executable))
+        base = os.environ.get('APPDATA') or os.path.expanduser('~')
+        d = os.path.join(base, 'JianyingNameEntry')
+        try:
+            os.makedirs(d, exist_ok=True)
+            return d
+        except Exception:
+            return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -1839,6 +1847,7 @@ def main():
     # 启动检测(非阻塞): 检测剪映是否可连
     startup_check(root, app)
     app._log("就绪：请在剪映中保持已选中的字幕条")
+    app._log(f"设置文件：{SETTINGS_FILE}")
     root.mainloop()
 
 if __name__ == '__main__':

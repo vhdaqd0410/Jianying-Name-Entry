@@ -13,7 +13,7 @@ if 'uiautomation' not in sys.modules:
     stub.uiautomation = stub
     sys.modules['uiautomation'] = stub
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 项目根(tests 的上一级)
 spec = importlib.util.spec_from_file_location('gb', os.path.join(HERE, 'gui_batch.pyw'))
 gb = importlib.util.module_from_spec(spec); spec.loader.exec_module(gb)
 

@@ -8,7 +8,7 @@ if 'uiautomation' not in sys.modules:
         setattr(stub, _n, type(_n, (), {}))
     sys.modules['uiautomation'] = stub
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # 项目根(tests 的上一级)
 spec = importlib.util.spec_from_file_location('gb', os.path.join(HERE, 'gui_batch.pyw'))
 gb = importlib.util.module_from_spec(spec); spec.loader.exec_module(gb)
 import tkinter as tk
@@ -91,13 +91,20 @@ ck('非冻结时=源码目录', gb.app_dir() == HERE, gb.app_dir())
 ck('SETTINGS_FILE 在 app_dir 下', os.path.dirname(gb.SETTINGS_FILE) == HERE or gb.SETTINGS_FILE.startswith(tmp))
 # 模拟冻结后的行为
 _real_frozen = getattr(sys, 'frozen', None)
+_real_appdata = os.environ.get('APPDATA')
 sys.frozen = True
-sys.executable = r'C:\SomeDir\海外人名条批量生成.exe'
-ck('冻结时=exe 所在目录', gb.app_dir() == r'C:\SomeDir', gb.app_dir())
+os.environ['APPDATA'] = tmp
+_frozen_dir = gb.app_dir()
+ck('冻结时=APPDATA 下专用目录', _frozen_dir == os.path.join(tmp, 'JianyingNameEntry'), _frozen_dir)
+ck('冻结时会自动建目录', os.path.isdir(_frozen_dir))
 if _real_frozen is None:
     del sys.frozen
 else:
     sys.frozen = _real_frozen
+if _real_appdata is None:
+    os.environ.pop('APPDATA', None)
+else:
+    os.environ['APPDATA'] = _real_appdata
 ck('还原后回到源码目录', gb.app_dir() == HERE, gb.app_dir())
 
 print('--- 真实 O 盘匹配 + 剪切到临时目录(只读O盘) ---')
