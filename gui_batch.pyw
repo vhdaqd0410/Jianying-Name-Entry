@@ -253,7 +253,7 @@ class BatchRunner:
     """批量导出运行器(在后台线程跑, 界面用回调更新)"""
     def __init__(self, ctrl, outdir, resolution=None, framerate=None, log_cb=None, progress_cb=None, dry_run=False,
                  transparent=False, ffmpeg_path='', final_root='', final_title='', final_subdir=FINAL_SUBDIR,
-                 final_move=True, conflict_policy='ask', conflict_cb=None):
+                 final_move=True, conflict_policy='ask', conflict_cb=None, resume=False):
         self.ctrl = ctrl
         self.outdir = outdir
         self.resolution = resolution
@@ -267,12 +267,14 @@ class BatchRunner:
         self.final_move = bool(final_move)  # True=剪切(移动), False=复制留原件
         self.conflict_policy = conflict_policy or 'ask'   # 同名冲突: ask/overwrite/rename/skip
         self.conflict_cb = conflict_cb      # 询问回调(conflicts)->策略; 主线程弹窗
+        self.resume = bool(resume)      # 断点续跑: 已生成过的名字直接跳过, 不重复导出
         self._produced = []             # 本次运行产生的文件(仅这些会被投送)
         self._archive_sub = ''          # 项目归档子目录名(如 项目A_20260902), run 后更新
         self._final_project = None      # 解析出的项目文件夹名
         self._final_dir = ''            # 解析出的最终落盘目录(项目\人名条)
         self._final_moved = 0           # 成功投送到最终位置的次数
         self._final_delivered = 0       # 本次实际投送成功的文件数(供界面判断该打开哪里)
+        self._skipped = []              # 断点续跑跳过的名字
         self.log_cb = log_cb or (lambda *a: None)
         self.progress_cb = progress_cb or (lambda *a: None)
         self._stop = threading.Event()
@@ -687,6 +689,34 @@ class BatchRunner:
         return True
 
     # ---- 批量入口
+    def _produced_names(self):
+        """断点续跑: 扫输出目录与最终目录, 收集已经出过的成片名(不含扩展名)。
+        包含被重命名为 姓名(1).mp4 的情况, 一并归到 姓名。"""
+        import re as _re
+        names = set()
+        dirs = []
+        if getattr(self, '_outdir_actual', ''):
+            dirs.append(self._outdir_actual)
+        fd = self._final_dir
+        if fd:
+            dirs.append(fd)
+        for d in dirs:
+            if not d or not os.path.isdir(d):
+                continue
+            try:
+                for f in os.listdir(d):
+                    stem, ext = os.path.splitext(f)
+                    if not _re.fullmatch(r'\.(mp4|mov)', ext, _re.I):
+                        continue
+                    # 转透明产物 姓名_透明.mov 是成片的附庸, 不单独作为一个“已完成名字”
+                    stem = _re.sub(r'_透明$', '', stem)
+                    stem = _re.sub(r'\(\d+\)$', '', stem)   # 同名避让产生的 姓名(1) 归到 姓名
+                    if stem:
+                        names.add(stem)
+            except Exception:
+                pass
+        return names
+
     def run(self, names, project=''):
         # 若指定了项目名, 输出目录下建 项目名_日期/ 子目录, 实现「项目+时间」归档
         outdir = self.outdir
@@ -703,10 +733,29 @@ class BatchRunner:
         # 最终位置(若设置): 先定位一次项目文件夹并提示, 避免每条都报错
         if self.final_root:
             self.resolve_final_dir(names)
+        # 断点续跑: 先盘点已经出过的名字, 这些本次直接跳过
+        self._done_names = set()
+        self._skipped = []
+        if self.resume and not self.dry_run:
+            self._done_names = self._produced_names()
+            hit = [n for n in names if n in self._done_names]
+            if hit:
+                self._log(f'\n[断点续跑] 已有 {len(hit)}/{len(names)} 条成片, 将跳过: ' +
+                          ', '.join(hit[:10]) + ('...' if len(hit) > 10 else ''))
+            else:
+                self._log('\n[断点续跑] 未发现已生成的成片, 本次全部导出')
+            todo = [n for n in names if n not in self._done_names]
+            if not todo:
+                self._log('[断点续跑] 全部已完成, 无需导出')
+                return {n: True for n in names}
+        else:
+            todo = list(names)
+
         before_set = self._scan_exports()
         results = {}
         run_start = time.time()
-        for idx, name in enumerate(names, 1):
+        # 跳过的不计入进度分母, 让剩余条数才是真实的待处理量
+        for idx, name in enumerate(todo, 1):
             if self._stop.is_set():
                 self._log('\n(已停止)')
                 break
@@ -714,16 +763,24 @@ class BatchRunner:
             if self._stop.is_set():
                 self._log('\n(已停止)')
                 break
-            self.progress_cb(idx, len(names), name, 'running')
+            self.progress_cb(idx, len(todo), name, 'running')
             t0 = time.time()
             ok = self.process_one(name, before_set)
             results[name] = ok
             self._per_name_time[name] = time.time() - t0
-            self.progress_cb(idx, len(names), name, 'ok' if ok else 'fail')
+            self.progress_cb(idx, len(todo), name, 'ok' if ok else 'fail')
             time.sleep(T_BETWEEN_NAMES)
+
+        # 跳过的名字按成功计入结果, 便于 run_log 与后续流程一致
+        skipped = [n for n in names if n not in results]
+        self._skipped = skipped
+        for n in skipped:
+            results[n] = True
 
         ok_names = [n for n, v in results.items() if v]
         fail_names = [n for n, v in results.items() if not v]
+        if skipped:
+            self._log(f'\n(其中跳过 {len(skipped)} 条已完成)')
         self._log(f'\n===== 结果: 成功{len(ok_names)} 失败{len(fail_names)} =====')
         if fail_names:
             self._log('失败: ' + ', '.join(fail_names))
@@ -965,6 +1022,15 @@ class App:
                        bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
                        font=('Microsoft YaHei', 9)).pack(side='left', padx=14)
 
+        # 断点续跑: 已出过的名字直接跳过, 中断后重跑不重复导出
+        resume_row = ttk.Frame(card3); resume_row.pack(fill='x', padx=12, pady=(0,3))
+        self.resume_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(resume_row, text='⏭ 断点续跑(已有成片的名字直接跳过)', variable=self.resume_var,
+                       bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
+                       font=('Microsoft YaHei', 9)).pack(side='left')
+        ttk.Label(resume_row, text='(中断后重跑不重复导出; 已生成的名字不会被覆盖)',
+                  foreground='#888888').pack(side='left', padx=4)
+
         # 导出后转透明通道 (第三版: 可选, 用 ffmpeg colorkey 抠黑转 ProRes 4444 MOV)
         trans_row = ttk.Frame(card3); trans_row.pack(fill='x', padx=12, pady=(0,3))
         self.transparent_var = tk.BooleanVar(value=False)
@@ -1030,11 +1096,16 @@ class App:
         # ============ 日志(右侧面板) ============
         log_card = ttk.Labelframe(right, text='日志', style='Card.TLabelframe')
         log_card.pack(fill='both', expand=True)
+        log_btns = ttk.Frame(log_card); log_btns.pack(fill='x', padx=8, pady=(8,0))
+        ttk.Button(log_btns, text='复制', command=self.copy_log).pack(side='left')
+        ttk.Button(log_btns, text='导出', command=self.export_log).pack(side='left', padx=(5,0))
+        ttk.Button(log_btns, text='清空', command=self.clear_log).pack(side='left', padx=(5,0))
         self.log_box = tk.Text(log_card, width=30, font=('Consolas', 9), state='disabled',
                                bg='#ffffff', relief='solid', bd=1, wrap='word')
-        self.log_box.pack(fill='both', expand=True, padx=8, pady=8)
+        self.log_box.pack(fill='both', expand=True, padx=8, pady=(6,8))
         self._runner = None
         self._thread = None
+        self._log_serial = 0        # 日志清空序号(用于丢弃清空前排队的日志)
 
         # 加载已保存的设置(剪映路径/输出目录/项目名/勾选项等)
         self._load_all_settings()
@@ -1047,6 +1118,8 @@ class App:
         self._start_link_polling()
 
         # 暂停/继续热键: Ctrl+P 或 空格键 (运行中可用)
+        # 空格必须全局绑定(绑到按钮上无效: ttk.Button 拿不到键盘焦点),
+        # 但处理函数里要按焦点让路 —— 焦点在输入框时不能吞掉空格。
         try:
             self.root.bind('<Control-p>', lambda e: self._hotkey_toggle_pause())
             self.root.bind('<space>', lambda e: self._hotkey_toggle_pause())
@@ -1054,6 +1127,41 @@ class App:
             pass
 
     # ---- 设置持久化
+    def _current_window_size(self):
+        """当前窗口尺寸字符串 'WxH'; 拿不到返回空串"""
+        try:
+            if self.root.state() == 'zoomed':
+                return 'zoomed'   # 记住最大化状态
+            return f'{self.root.winfo_width()}x{self.root.winfo_height()}'
+        except Exception:
+            return ''
+
+    def _apply_window_size(self, v):
+        """恢复上次的窗口尺寸(或最大化状态)"""
+        s = str(v or '').strip()
+        if not s:
+            return
+        try:
+            if s == 'zoomed':
+                self.root.state('zoomed')
+                return
+            import re as _re
+            if _re.fullmatch(r'\d+x\d+', s):
+                w, h = (int(x) for x in s.split('x'))
+                # 防止上次在超大屏上留的尺寸把窗口放到看不见的地方
+                w = max(820, min(w, 10000))
+                h = max(620, min(h, 10000))
+                self.root.geometry(f'{w}x{h}')
+        except Exception:
+            pass
+
+    def _save_window_size(self):
+        """关窗时记下当前尺寸(最大化存 'zoomed')"""
+        try:
+            self._save_setting('window_size', self._current_window_size())
+        except Exception:
+            pass
+
     def _load_setting(self, key):
         """从设置文件读取某个键的值"""
         try:
@@ -1097,6 +1205,8 @@ class App:
             'final_subdir': self.final_subdir_var.get().strip(),
             'final_move': bool(self.final_move_var.get()),
             'final_conflict': self._conflict_policy(),
+            'resume': bool(self.resume_var.get()),
+            'window_size': self._current_window_size(),
             'project': self.project_var.get().strip(),
             'open_dir': bool(self.open_dir_var.get()),
             'auto_run': bool(self.auto_run_var.get()),
@@ -1117,7 +1227,9 @@ class App:
             'final_title': lambda v: self.final_title_var.set(str(v)),
             'final_subdir': lambda v: self.final_subdir_var.set(str(v)),
             'final_move': lambda v: self.final_move_var.set(bool(v)),
-            'final_conflict': lambda v: self.conflict_var.set(FROM_CONFLICT_VALUE.get(str(v), '询问')),
+            'final_conflict': lambda v: self.conflict_var.set(FROM_CONFLICT_VALUE.get(str(v), DEFAULT_CONFLICT_LABEL)),
+            'resume': lambda v: self.resume_var.set(bool(v)),
+            'window_size': lambda v: self._apply_window_size(v),
             'project': lambda v: self.project_var.set(str(v)),
             'open_dir': lambda v: self.open_dir_var.set(bool(v)),
             'auto_run': lambda v: self.auto_run_var.set(bool(v)),
@@ -1671,7 +1783,8 @@ class App:
                                  final_title=self.final_title_var.get(),
                                  final_subdir=self.final_subdir_var.get(),
                                  final_move=self.final_move_var.get(),
-                                 conflict_policy=self._conflict_policy())
+                                 conflict_policy=self._conflict_policy(),
+                                 resume=self.resume_var.get())
             results = runner.run(names, project)
         except Exception as ex:
             self._log(f'预览异常: {ex}')
@@ -1724,7 +1837,8 @@ class App:
                                        final_subdir=self.final_subdir_var.get(),
                                        final_move=self.final_move_var.get(),
                                        conflict_policy=self._conflict_policy(),
-                                       conflict_cb=self._ask_conflict)
+                                       conflict_cb=self._ask_conflict,
+                                       resume=self.resume_var.get())
             results = self._runner.run(names, project)
         except Exception as ex:
             self._log(f'致命错误: {ex}')
@@ -1784,14 +1898,19 @@ class App:
             self._log('预览中断')
 
     def rerun_failed(self):
-        """一键重跑上次失败的名字 (契合先小批量试跑再全量的工作流)"""
+        """一键重跑上次失败的名字。
+
+        不破坏用户原来的全量名单: 重跑直接在后台跑失败名单, 界面上的名字列表保持不动,
+        (以前会把它换成失败名单, 导致全量名单丢失、想再全跑得重新导入。)"""
         if not self._last_fail_names:
             messagebox.showinfo('重跑失败', '没有失败的名字可重跑')
             return
-        # 重跑前把名字列表替换为失败名单, 便于用户看到在跑什么
-        self._set_names(self._last_fail_names)
-        self._log(f'↻ 重跑失败 {len(self._last_fail_names)} 个: {", ".join(self._last_fail_names)}')
-        self._start_run(self._last_fail_names, self.outdir_var.get().strip() or DEFAULT_OUTDIR)
+        fails = list(self._last_fail_names)
+        onscreen = self._get_names()
+        self._log(f'↻ 重跑失败 {len(fails)} 个: {", ".join(fails)}')
+        if set(fails) != set(onscreen):
+            self._log(f'   (名字列表保持为原全量 {len(onscreen)} 个, 未被覆盖)')
+        self._start_run(fails, self.outdir_var.get().strip() or DEFAULT_OUTDIR)
 
     def _play_beep(self, kind='ok'):
         """提示音: ok=完成/成功, fail=有失败。用 winsound 标准库, 无声环境静默"""
@@ -1872,11 +1991,41 @@ class App:
             self.prog_var.set('继续中...')
             self._log('▶ 已继续')
 
+    def _focus_is_text(self):
+        """当前焦点是否在文本输入类控件上(名字框/输入框/下拉框)。
+        用 winfo_class 判断, 不依赖具体控件引用, 后续新增输入框也能自动受保护。"""
+        try:
+            w = self.root.focus_get()
+        except Exception:
+            return False
+        if w is None:
+            return False
+        try:
+            return w.winfo_class() in ('Text', 'Entry', 'TEntry', 'TCombobox', 'Spinbox', 'TSpinbox')
+        except Exception:
+            return False
+
     def _hotkey_toggle_pause(self):
-        """热键触发暂停: 仅在运行中且暂停按钮可用时生效"""
-        if getattr(self, '_running', False) and self.pause_btn.cget('state') != 'disabled':
-            self.toggle_pause()
-        return 'break'  # 阻止空格在文本框输入空格
+        """热键触发暂停。
+
+        两种情况必须放行(不拦键、不暂停):
+          1. 焦点在输入框 —— 用户是在打空格(名字里常带空格, 如 Amanda Sterling)
+          2. 没在运行或暂停按钮不可用 —— 热键无意义, 不该吞掉按键
+
+        注: ttk 的 cget('state') 返回 Tcl 对象, 与字符串 'disabled' 直接比较不可靠,
+        必须用 instate(['disabled']) 判断。
+        """
+        if self._focus_is_text():
+            return None                       # 让空格正常输入
+        if not getattr(self, '_running', False):
+            return None
+        try:
+            if self.pause_btn.instate(['disabled']):
+                return None
+        except Exception:
+            pass
+        self.toggle_pause()
+        return 'break'
 
     def _load_history(self):
         """从配置文件加载草稿名历史"""
@@ -1976,16 +2125,29 @@ class App:
             self.root.after(150, self._poll_link_status)
 
     def _poll_link_status(self):
-        """后台检测剪映连接状态, 完成后调度下一次轮询"""
+        """后台检测剪映连接状态, 完成后调度下一次轮询。
+
+        _link_checking 必须由后台线程真正结束时才清掉(而不是主线程定时器),
+        否则剪映未开时查找窗口要重试很久, 主线程却提前补新线程 -> 并发堆积。"""
         if not getattr(self, '_polling', True):
             return
-        # 避免上一次检测还在进行时重复起线程
+        # 上一次检测还在跑: 稍后再看, 不再起新线程
         if getattr(self, '_link_checking', False):
-            self.root.after(self.LINK_POLL_MS, self._poll_link_status)
+            self.root.after(500, self._poll_link_status)
             return
         self._link_checking = True
-        timeout = self.LINK_CHECK_TIMEOUT
         holder = {}
+
+        def _finish():
+            """后台线程结束(无论成败)后在主线程收尾并安排下一轮"""
+            self._link_checking = False
+            if holder.get('ok'):
+                self._set_link_status('connected', '已连接')
+            else:
+                self._set_link_status('disconnected', '未连接')
+            if getattr(self, '_polling', True):
+                self.root.after(self.LINK_POLL_MS, self._poll_link_status)
+
         def worker():
             try:
                 ctypes.oledll.ole32.CoInitialize(None)
@@ -1996,26 +2158,83 @@ class App:
                 holder['ok'] = True
             except Exception:
                 holder['ok'] = False
+            finally:
+                # 只有线程真结束才清标志位, 从根上避免多线程同时探测
+                try:
+                    self.root.after(0, _finish)
+                except Exception:
+                    self._link_checking = False
+
         threading.Thread(target=worker, daemon=True).start()
-        # 主线程不等待, 用定时器在超时后收结果
-        def _check_done():
-            self._link_checking = False
-            if holder.get('ok'):
-                self._set_link_status('connected', '已连接')
-            else:
-                self._set_link_status('disconnected', '未连接')
-            if getattr(self, '_polling', True):
-                self.root.after(self.LINK_POLL_MS, self._poll_link_status)
-        self.root.after(int(timeout * 1000) + 200, _check_done)
 
     def _log(self, msg):
+        serial = self._log_epoch()          # 记录写入时的清空序号
         def do():
+            # 这条日志排队期间用户点了“清空” -> 丢弃, 不再补写回去
+            if serial != self._log_epoch():
+                return
             self.log_box.config(state='normal')
             self.log_box.insert('end', msg + '\n')
             self.log_box.see('end')
             self.log_box.config(state='disabled')
         try: self.root.after(0, do)
         except Exception: pass
+
+    # ---- 日志复制 / 导出 / 清空
+    def _log_epoch(self):
+        return getattr(self, '_log_serial', 0)
+
+    def _log_text(self):
+        try:
+            return self.log_box.get('1.0', 'end').rstrip('\n')
+        except Exception:
+            return ''
+
+    def copy_log(self):
+        """把整个日志框内容复制到剪贴板"""
+        txt = self._log_text()
+        if not txt:
+            messagebox.showinfo('复制日志', '日志为空')
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(txt)
+        self.root.update()
+        self._log(f'📋 已复制日志到剪贴板 ({len(txt)} 字符)')
+
+    def export_log(self):
+        """把日志存成 .txt 文件(默认放到输出目录, 便于随项目留档/发给别人)"""
+        txt = self._log_text()
+        if not txt:
+            messagebox.showinfo('导出日志', '日志为空')
+            return
+        init_dir = self.outdir_var.get().strip() or DEFAULT_OUTDIR
+        init_name = f'人名条日志_{time.strftime("%Y%m%d_%H%M%S")}.txt'
+        path = filedialog.asksaveasfilename(
+            title='导出日志', defaultextension='.txt', initialfile=init_name,
+            initialdir=init_dir if os.path.isdir(init_dir) else None,
+            filetypes=[('文本文件', '*.txt'), ('所有', '*.*')])
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(txt + '\n')
+            self._log(f'📄 日志已导出: {path}')
+        except Exception as ex:
+            messagebox.showerror('导出失败', str(ex))
+
+    def clear_log(self):
+        """清空日志框。
+
+        _log 走 after 排队写入, 所以清空时必须把“清空前排队的那些行”一并丢弃,
+        否则刚清完、界面一刷新旧行又冒出来。用序号(serial)标识清空点。"""
+        self._log_serial = self._log_epoch() + 1
+        try:
+            self.log_box.config(state='normal')
+            self.log_box.delete('1.0', 'end')
+            self.log_box.config(state='disabled')
+        except Exception:
+            pass
+        return 'break'
 
 
 def startup_check(root, app):
@@ -2037,6 +2256,11 @@ def startup_check(root, app):
 def main():
     root = tk.Tk()
     app = App(root)
+    # 关窗前记下窗口尺寸, 下次启动恢复
+    try:
+        root.protocol('WM_DELETE_WINDOW', lambda: (app._save_window_size(), root.destroy()))
+    except Exception:
+        pass
     # 启动检测(非阻塞): 检测剪映是否可连
     startup_check(root, app)
     app._log("就绪：请在剪映中保持已选中的字幕条")
