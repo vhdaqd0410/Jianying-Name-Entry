@@ -176,13 +176,46 @@ names = ['Adam', 'Ben', 'Cara']
 pr.run(names)
 ck('处理过程中最终目录一直是空的', all(s == [] for s in pr.snapshots), pr.snapshots)
 ck('三个成片都已投送', all(os.path.exists(os.path.join(TARGET, n + '.mp4')) for n in names))
-ck('run_log 也投送了', os.path.exists(os.path.join(TARGET, 'run_log.csv')))
+ck('run_log 留在输出目录', os.path.exists(os.path.join(OUT, 'run_log.csv')))
+ck('run_log 未被投送过去', not os.path.exists(os.path.join(TARGET, 'run_log.csv')))
+ck('_final_delivered 记录了成功数', pr._final_delivered == 3, pr._final_delivered)
 ck('本批三个成片已离开输出目录(剪切)',
    [x for x in os.listdir(OUT) if x.split('.')[0] in names] == [], os.listdir(OUT))
 ck('前面用例刻意留下的文件仍在', os.path.exists(os.path.join(OUT, 'NoFinal.mp4')) and
    os.path.exists(os.path.join(OUT, '别人放的.mp4')))
 ck('日志有投送阶段标题', any('输出完成, 开始投送' in m for m in LOG), [m for m in LOG if '投送' in m])
-ck('produced 只含 3 成片 + run_log', len(pr._produced) == 4, pr._produced)
+ck('produced 只含 3 成片(run_log 不参与投送)', len(pr._produced) == 3, pr._produced)
+
+print('--- 投送成功数用于决定打开哪个目录 ---')
+LOG.clear()
+for f_ in os.listdir(TARGET):
+    os.remove(os.path.join(TARGET, f_))
+mk1 = make_out('Open1.mp4', b'O1')
+rA = mk('rename'); rA._produced = [mk1]
+stA = rA.deliver_all(['Open1'])
+ck('投送成功后 _final_delivered>0', rA._final_delivered == 1, stA)
+ck('可打开的是最终目录', os.path.isdir(rA._final_dir) and rA._final_dir.endswith('人名条'))
+mk2 = make_out('Open2.mp4', b'O2')
+rB = gb.BatchRunner(None, OUT, log_cb=lambda m: LOG.append(m),
+                    final_root=FIN, final_title='根本不存在的剧X')
+rB._produced = [mk2]
+rB.deliver_all(['Open2'])
+ck('未投送时 _final_delivered=0(界面会回退到输出目录)', rB._final_delivered == 0)
+ck('未投送时文件留在输出目录', os.path.exists(mk2))
+
+print('--- 人名条子目录自动创建 ---')
+FIN3 = os.path.join(TMP, '最终3')
+P3 = os.path.join(FIN3, '555-测试《要新建子目录的剧》')
+os.makedirs(P3)   # 项目在, 但没有 人名条
+ck('建前确实没有', not os.path.isdir(os.path.join(P3, '人名条')))
+rC = gb.BatchRunner(None, OUT, log_cb=lambda m: LOG.append(m),
+                    final_root=FIN3, final_title='要新建子目录的剧')
+d3 = rC.resolve_final_dir(['x'])
+ck('自动创建了 人名条', os.path.isdir(os.path.join(P3, '人名条')), os.listdir(P3))
+mk3 = make_out('New1.mp4', b'N1')
+rC._produced = [mk3]
+rC.deliver_all(['x'])
+ck('文件进了新建目录', os.path.exists(os.path.join(P3, '人名条', 'New1.mp4')))
 
 shutil.rmtree(TMP, ignore_errors=True)
 print()

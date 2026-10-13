@@ -272,6 +272,7 @@ class BatchRunner:
         self._final_project = None      # 解析出的项目文件夹名
         self._final_dir = ''            # 解析出的最终落盘目录(项目\人名条)
         self._final_moved = 0           # 成功投送到最终位置的次数
+        self._final_delivered = 0       # 本次实际投送成功的文件数(供界面判断该打开哪里)
         self.log_cb = log_cb or (lambda *a: None)
         self.progress_cb = progress_cb or (lambda *a: None)
         self._stop = threading.Event()
@@ -631,6 +632,7 @@ class BatchRunner:
 
         self._log(f'投送完成: 新搬{stat["moved"]} 覆盖{stat["overwritten"]} '
                   f'改名{stat["renamed"]} 跳过{stat["skipped"]} 失败{stat["failed"]}')
+        self._final_delivered = (stat['moved'] + stat['overwritten'] + stat['renamed'])
         return stat
 
     # ---- 干跑预览: 不操作剪映, 只模拟预览每个名字将如何处理
@@ -729,9 +731,7 @@ class BatchRunner:
         if not self.dry_run:
             try:
                 log_path = self._write_run_log(outdir, names, results, run_start)
-                # run_log 也作为本次产物, 随成片一起投送
-                if log_path and os.path.exists(log_path):
-                    self._produced.append(log_path)
+                # run_log.csv 留在输出目录, 不随成片投送
             except Exception as ex:
                 self._log(f'写run_log失败: {ex}')
             # 整批输出已全部完成, 现在才统一投送到最终目录
@@ -1367,7 +1367,9 @@ class App:
             "   - 子文件夹: 默认“人名条”, 可改成别的名字\n"
             "   - 剪切: 默认勾选(输出目录不留原件); 不勾则只复制\n"
             "   - 投送时机: 全部导出完成后统一剪切, 不是出一条剪一条;\n"
-            "     只搬本次生成的成片与 run_log, 输出目录里的其它文件不会被碰\n"
+            "     只搬本次生成的成片, 输出目录里的其它文件不会被碰\n"
+            "   - 人名条子目录不存在会自动创建\n"
+            "   - run_log.csv 留在输出目录, 不随成片拷过去\n"
             "   - 同名处理: 最终目录已有同名文件时的做法\n"
             "     询问(默认, 弹窗让你现场选) / 覆盖 / 自动改名 / 跳过\n"
             "   - 匹配预览: 先看看能定位到哪个项目文件夹, 不改任何文件\n"
@@ -1386,7 +1388,8 @@ class App:
             "11. 自动执行\n"
             "   勾选'打开草稿并选中后自动开始批量任务', 打开草稿成功即自动跑。\n\n"
             "12. 完成后打开目录\n"
-            "   勾选后, 批量完整跑完自动弹出输出文件夹。\n\n"
+            "   勾选后, 批量完整跑完自动弹出文件夹。\n"
+            "   投送成功则弹最终位置(项目\\人名条\\)；未投送则弹输出目录。\n\n"
             "小提示\n"
             "   - 请确保剪映专业版已打开、字幕条已就绪\n"
             "   - 支持先小批量试跑确认效果再全量"
@@ -1753,13 +1756,19 @@ class App:
         elif completed:
             self.rerun_btn.config(state='disabled')
             self._play_beep('ok')
-        # 勾选'完成后打开成品目录'且完整跑完时, 打开实际输出目录(含归档子目录)
+        # 勾选'完成后打开成品目录'且完整跑完时, 优先打开最终位置(投送落盘处), 退到输出目录
         if completed and self.open_dir_var.get():
-            outdir = self._runner._outdir_actual if (self._runner and hasattr(self._runner, '_outdir_actual')) else (self.outdir_var.get().strip() or DEFAULT_OUTDIR)
-            if os.path.isdir(outdir):
+            runner = self._runner
+            final_dir = getattr(runner, '_final_dir', '') if runner else ''
+            delivered = bool(getattr(runner, '_final_delivered', 0)) if runner else False
+            outdir = (getattr(runner, '_outdir_actual', '') if runner else '') or self.outdir_var.get().strip() or DEFAULT_OUTDIR
+            # 投送成功且最终目录存在 -> 打开最终位置; 否则打开输出目录
+            target = final_dir if (delivered and final_dir and os.path.isdir(final_dir)) else outdir
+            label = '最终位置' if target == final_dir else '输出目录'
+            if os.path.isdir(target):
                 try:
-                    os.startfile(outdir)
-                    self._log(f'📁 已打开成品目录: {outdir}')
+                    os.startfile(target)
+                    self._log(f'📁 已打开{label}: {target}')
                 except Exception as ex:
                     self._log(f'打开目录失败: {ex}')
 

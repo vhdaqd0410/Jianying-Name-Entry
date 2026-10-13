@@ -168,6 +168,45 @@ app.root.mainloop()
 ck('工作线程能拿到询问答复', holder.get('v') == 'skip', holder.get('v'))
 app._conflict_dialog = gb_orig
 
+print('--- 完成后打开哪个目录 ---')
+opens = []
+_orig_startfile = getattr(os, 'startfile', None)
+os.startfile = lambda p: opens.append(p)
+
+class FinRunner:
+    pass
+
+final_dir = os.path.join(tmp, '最终', '某剧', '人名条')
+outd = os.path.join(tmp, '输出')
+os.makedirs(final_dir, exist_ok=True); os.makedirs(outd, exist_ok=True)
+
+fr = FinRunner(); fr._outdir_actual = outd; fr._final_dir = final_dir; fr._final_delivered = 3
+app._runner = fr
+app.open_dir_var.set(True)
+app._finish({'A': True}, ['A'])
+ck('已投送 → 打开最终位置', opens and opens[-1] == final_dir, opens)
+
+opens.clear()
+app.log_box.config(state='normal'); app.log_box.delete('1.0', 'end'); app.log_box.config(state='disabled')
+fr3 = FinRunner(); fr3._outdir_actual = outd; fr3._final_dir = final_dir; fr3._final_delivered = 2
+app._runner = fr3
+app._finish({'A': True}, ['A'])
+root.update()   # 让 _log 的 after 回调落盘
+logs_txt = app.log_box.get('1.0', 'end')
+ck('日志标明“最终位置”', '已打开最终位置' in logs_txt, [l for l in logs_txt.splitlines() if '打开' in l])
+
+opens.clear()
+fr2 = FinRunner(); fr2._outdir_actual = outd; fr2._final_dir = final_dir; fr2._final_delivered = 0
+app._runner = fr2
+app._finish({'A': True}, ['A'])
+ck('未投送 → 回退打开输出目录', opens and opens[-1] == outd, opens)
+
+opens.clear()
+if _orig_startfile:
+    os.startfile = _orig_startfile
+else:
+    del os.startfile
+
 print('--- 可写目录解析(冻结/非冻结) ---')
 ck('非冻结时=源码目录', gb.app_dir() == HERE, gb.app_dir())
 ck('SETTINGS_FILE 在 app_dir 下', os.path.dirname(gb.SETTINGS_FILE) == HERE or gb.SETTINGS_FILE.startswith(tmp))
