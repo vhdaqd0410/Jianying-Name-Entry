@@ -19,6 +19,17 @@ def resource_path(rel):
     return os.path.join(base, rel)
 
 
+def app_dir():
+    """可写数据的存放目录(配置/模板/草稿历史)。
+
+    打包后 __file__ 指向 _MEIPASS 临时解包目录, 写在那里程序一退就被删,
+    设置存不住。因此冻结运行时用 exe 自身所在目录(便携, 用户看得到、好备份)。
+    """
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 # ------------------------------------------------------------------ 时间配置 (可调)
 # 固定等待时间均在此集中配置, 调快/调稳只需改这里。单位: 秒。
 # 注意: 渲染等待(wait_for_export_completion)由剪映导出速度决定, 此处无法加速。
@@ -52,15 +63,15 @@ def detect_ffmpeg_path():
             return p
     return ''
 
-# 草稿名历史记录文件 (存到项目目录, 随工具迁移)
-HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.draft_history.json')
+# 草稿名历史记录文件 (存到程序目录, 随工具迁移)
+HISTORY_FILE = os.path.join(app_dir(), '.draft_history.json')
 MAX_HISTORY = 20  # 最多保留的历史条数
 
 # 设置文件 (剪映路径等)
-SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+SETTINGS_FILE = os.path.join(app_dir(), 'config.json')
 
 # 项目模板文件 (预设: 项目名/输出目录/勾选项组合)
-TEMPLATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates.json')
+TEMPLATE_FILE = os.path.join(app_dir(), 'templates.json')
 
 # 剪映常见安装路径 (用于自动探测)
 COMMON_JIANYING_PATHS = [
@@ -141,10 +152,90 @@ def click(x, y):
     user32.mouse_event(0x0002, 0, 0, 0, 0); user32.mouse_event(0x0004, 0, 0, 0, 0); time.sleep(0.08)
 
 
+DEFAULT_FINAL_ROOT = r'O:\AI漫剧剪辑一组'
+FINAL_SUBDIR = '人名条'   # 项目目录内的子文件夹名(成片剪切到里面)
+
+
+def norm_title(s: str) -> str:
+    """把剧名/文件夹名归一化成可比较的形式:
+    去掉序号前缀(如 32_ / 731-11926-)、后缀(角色场景表/人物场景表)、
+    以及所有标点与空白(书名号《》、顿号、括号等)。返回小写。
+
+    归一化后两边都是纯「字母+数字+汉字」，于是 '合约八年我成了自己的靠山'
+    能作为 '73111926海外合约八年我成了自己的靠山' 的子串命中。
+    """
+    import re
+    s = os.path.splitext(str(s))[0]                 # 去扩展名
+    s = re.sub(r'^(\d+[_\-\s]*)+', '', s)          # 去序号前缀(可能多层, 如 731-11926-)
+    s = re.sub(r'[_\-\s]*(角色场景表|人物场景表|角色表|场景表|人名条|人物表)$', '', s)  # 去后缀
+    s = re.sub(r'[^0-9A-Za-z\u4e00-\u9fff]+', '', s)  # 去标点/空白/下划线
+    return s.lower()
+
+
+def clean_title(s: str) -> str:
+    """把剧名清理成适合显示/手改的形式: 去序号前缀与“角色场景表”这类后缀,
+    但保留中间的可读标点(与 norm_title 不同, 后者是全量归一化仅用于比较)。
+    如 '32_合约八年我成了自己的靠山_角色场景表' → '合约八年我成了自己的靠山'。"""
+    import re
+    s = os.path.splitext(str(s))[0].strip()
+    s = re.sub(r'^(\d+[_\-\s]+)+', '', s)   # 去序号前缀(要求后面跟分隔符, 避免吃掉剧名开头的数字)
+    s = re.sub(r'[_\-\s]*(角色场景表|人物场景表|角色表|场景表|人物表)$', '', s)  # 去后缀
+    return s.strip(' _-')
+
+
+def match_project(root: str, title: str, names=None):
+    """在 root 下找剧名对应的项目文件夹。
+
+    返回 (项目文件夹名, 依据) 或 (None, 原因)。
+    第一优: 剧名归一化后是候选文件夹名的子串(唯一或取覆盖度最高者)。
+    兜底: 候选项目 人名条/ 里已有文件的文件名与本次名字集合重合度过半。
+    """
+    try:
+        subs = [d for d in sorted(os.listdir(root))
+                if os.path.isdir(os.path.join(root, d))]
+    except Exception:
+        return None, '根目录不可读'
+    if not subs:
+        return None, '根目录下没有项目文件夹'
+
+    nt = norm_title(title) if title else ''
+    if nt:
+        cands = [d for d in subs if nt in norm_title(d)]
+        if len(cands) == 1:
+            return cands[0], '剧名匹配'
+        if len(cands) > 1:
+            # 多个命中时取与剧名最接近的(归一化长度差最小)
+            best = min(cands, key=lambda d: abs(len(norm_title(d)) - len(nt)))
+            return best, '剧名匹配(多命中取最接近)'
+
+    # 兜底: 用已有成片的文件名与本次名字集合比重合度
+    if names:
+        want = {norm_title(n) for n in names if str(n).strip()}
+        best, best_score = None, 0.0
+        for d in subs:
+            p = os.path.join(root, d, FINAL_SUBDIR)
+            if not os.path.isdir(p):
+                continue
+            try:
+                have = {norm_title(f) for f in os.listdir(p)}
+            except Exception:
+                continue
+            if not want:
+                continue
+            score = len(have & want) / len(want)
+            if score > best_score:
+                best, best_score = d, score
+        if best and best_score >= 0.5:
+            return best, f'已有成片名字重合 {int(best_score * 100)}%'
+
+    return None, ('剧名未匹配到任何项目文件夹' if nt else '未提供剧名')
+
+
 class BatchRunner:
     """批量导出运行器(在后台线程跑, 界面用回调更新)"""
     def __init__(self, ctrl, outdir, resolution=None, framerate=None, log_cb=None, progress_cb=None, dry_run=False,
-                 transparent=False, ffmpeg_path=''):
+                 transparent=False, ffmpeg_path='', final_root='', final_title='', final_subdir=FINAL_SUBDIR,
+                 final_move=True):
         self.ctrl = ctrl
         self.outdir = outdir
         self.resolution = resolution
@@ -152,6 +243,14 @@ class BatchRunner:
         self.dry_run = dry_run
         self.transparent = transparent   # 导出后是否转透明通道(ProRes 4444 MOV)
         self.ffmpeg_path = ffmpeg_path   # ffmpeg 可执行文件路径
+        self.final_root = (final_root or '').strip()      # 最终位置根目录(如 O:\AI漫剧剪辑一组)
+        self.final_title = (final_title or '').strip()    # 剧名, 用于匹配项目文件夹
+        self.final_subdir = (final_subdir or FINAL_SUBDIR).strip()  # 项目内子文件夹名
+        self.final_move = bool(final_move)  # True=剪切(移动), False=复制留原件
+        self._archive_sub = ''          # 项目归档子目录名(如 项目A_20260902), run 后更新
+        self._final_project = None      # 解析出的项目文件夹名
+        self._final_dir = ''            # 解析出的最终落盘目录(项目\人名条)
+        self._final_moved = 0           # 成功剪切到最终位置的次数
         self.log_cb = log_cb or (lambda *a: None)
         self.progress_cb = progress_cb or (lambda *a: None)
         self._stop = threading.Event()
@@ -340,10 +439,10 @@ class BatchRunner:
         # 等文件写入完成(大小稳定)后再移动, 避免剪映还在写导致等待
         self._wait_file_stable(src, timeout=15)
 
-        # 移动归置 (文件名与名字一致)
-        target = os.path.join(self.outdir, name + '.mp4')
+        # 移动归置 (文件名与名字一致); 用 _outdir_actual 才能落到 项目名_日期/ 归档子目录
+        target = os.path.join(self._outdir_actual, name + '.mp4')
         if os.path.exists(target):
-            target = os.path.join(self.outdir, name + '(1).mp4')
+            target = os.path.join(self._outdir_actual, name + '(1).mp4')
         try:
             # 同盘用原子replace更快; 跨盘(如桌面C盘→O盘)用shutil.move自动copy+delete
             if os.path.splitdrive(src)[0].lower() == os.path.splitdrive(target)[0].lower():
@@ -352,16 +451,81 @@ class BatchRunner:
                 shutil.move(src, target)
             self._log(f'  -> {target}')
             before_set.discard(src)
+            produced = [target]
             # 若勾选转透明, 导出后把该 MP4 转成带透明通道的 MOV
             if self.transparent:
                 ok_t = self._convert_transparent(target, name)
-                if not ok_t:
+                if ok_t:
+                    produced.append(os.path.splitext(target)[0] + '_透明.mov')
+                else:
                     self._transparent_fails += 1
+            # 设置过"最终位置"则把成片剪切/复制过去(输出目录原件默认剪切走)
+            self._deliver_final(produced)
             return True
         except Exception as ex:
             self._log(f'  移动失败:{ex}')
             before_set.add(src)
             return False
+
+    # ---- 最终位置: 自动定位项目文件夹, 把成片剪切(或复制)到 项目\人名条\
+    def resolve_final_dir(self, names=None):
+        """根据 final_root + final_title 定位出最终落盘目录 项目\人名条\。
+        找不到返回空串(不报错), 把原因写进日志。已解析过则直接复用。"""
+        if not self.final_root:
+            return ''
+        if self._final_dir:
+            return self._final_dir
+        if not os.path.isdir(self.final_root):
+            self._log(f'!!最终位置根目录不存在: {self.final_root} (本次不剪切)')
+            return ''
+        proj, why = match_project(self.final_root, self.final_title, names)
+        if not proj:
+            self._log(f'!!未定位到项目文件夹({why}); 根目录={self.final_root} 剧名={self.final_title or "(空)"}')
+            return ''
+        d = os.path.join(self.final_root, proj, self.final_subdir)
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception as ex:
+            self._log(f'!!最终目录创建失败: {d} ({ex})')
+            return ''
+        self._final_project = proj
+        self._final_dir = d
+        self._log(f'最终位置已定位: {d}   [{why}]')
+        return d
+
+    def _deliver_final(self, files):
+        """把已归置的成片(含转透明产物)剪切/复制到最终目录。
+        原件默认剪切走(移动); final_move=False 时保留原件只复制。
+        同名不覆盖, 自动加 (1); 失败只记日志, 不影响本条结果。"""
+        dst_dir = self.resolve_final_dir()
+        if not dst_dir:
+            return
+        for src in files:
+            if not src or not os.path.exists(src):
+                continue
+            base = os.path.basename(src)
+            stem, ext = os.path.splitext(base)
+            dst = os.path.join(dst_dir, base)
+            if os.path.exists(dst):
+                for i in range(1, 100):
+                    cand = os.path.join(dst_dir, f'{stem}({i}){ext}')
+                    if not os.path.exists(cand):
+                        dst = cand
+                        break
+            try:
+                if self.final_move:
+                    # 同盘用原子 replace; 跨盘(如 C盘输出 → O盘最终)用 shutil.move(copy+delete)
+                    if os.path.splitdrive(src)[0].lower() == os.path.splitdrive(dst)[0].lower():
+                        os.replace(src, dst)
+                    else:
+                        shutil.move(src, dst)
+                    self._log(f'  ⇢ 已剪切到最终位置: {dst}')
+                else:
+                    shutil.copy2(src, dst)
+                    self._log(f'  ⇢ 已复制到最终位置: {dst}')
+                self._final_moved += 1
+            except Exception as ex:
+                self._log(f'  !!送往最终位置失败({base}): {ex}')
 
     # ---- 干跑预览: 不操作剪映, 只模拟预览每个名字将如何处理
     # ---- 转透明通道: 把已归置的 MP4 用 colorkey 抠黑转成 ProRes 4444 MOV
@@ -410,6 +574,9 @@ class BatchRunner:
         if issues:
             self._log('  ' + '; '.join(issues))
         self._log(f'  [预览] 将导出 → {target}')
+        if self.final_root:
+            fd = self._final_dir or '(运行开始时自动定位)'
+            self._log(f'  [预览] 将{"剪切" if self.final_move else "复制"}到最终位置 → {fd}')
         return True
 
     # ---- 批量入口
@@ -425,6 +592,10 @@ class BatchRunner:
                 outdir = os.path.join(self.outdir, archive_sub)
         os.makedirs(outdir, exist_ok=True)
         self._outdir_actual = outdir
+        self._archive_sub = archive_sub
+        # 最终位置(若设置): 先定位一次项目文件夹并提示, 避免每条都报错
+        if self.final_root:
+            self.resolve_final_dir(names)
         before_set = self._scan_exports()
         results = {}
         run_start = time.time()
@@ -452,7 +623,10 @@ class BatchRunner:
         # 写 run_log.csv (成功/失败、耗时、时间戳)。干跑预览不写正式日志。
         if not self.dry_run:
             try:
-                self._write_run_log(outdir, names, results, run_start)
+                log_path = self._write_run_log(outdir, names, results, run_start)
+                # 最终位置若启用, 把 run_log.csv 一并送过去
+                if self.final_root and log_path and os.path.exists(log_path):
+                    self._deliver_final([log_path])
             except Exception as ex:
                 self._log(f'写run_log失败: {ex}')
         else:
@@ -482,6 +656,7 @@ class BatchRunner:
                 w.writeheader()
             w.writerows(rows)
         self._log(f'📄 已写入日志: {log_path}  (本次{len(rows)}条, 总耗时{round(total_time,1)}s)')
+        return log_path
 
 
 # ------------------------------------------------------------------ 界面
@@ -634,6 +809,31 @@ class App:
         ttk.Entry(proj_row, textvariable=self.project_var).pack(side='left', fill='x', expand=True, padx=(0,5))
         ttk.Label(proj_row, text='如: 项目A_2026', foreground='#888888').pack(side='left')
 
+        # 最终位置: 设定根目录后自动匹配项目文件夹, 成片剪切到 项目\人名条\
+        ttk.Label(card3, text='最终位置根目录 (选填; 如 O:\\AI漫剧剪辑一组。填了则自动匹配项目文件夹, 成片剪切进去)').pack(anchor='w', padx=12, pady=(6,2))
+        fin_row = ttk.Frame(card3); fin_row.pack(fill='x', padx=12)
+        self.final_root_var = tk.StringVar()
+        ttk.Entry(fin_row, textvariable=self.final_root_var).pack(side='left', fill='x', expand=True, padx=(0,5))
+        ttk.Button(fin_row, text='浏览', command=self.pick_final_root).pack(side='left', padx=(0,3))
+        ttk.Button(fin_row, text='清除', command=lambda: self.final_root_var.set('')).pack(side='left')
+
+        # 剧名 (用于匹配项目文件夹) + 子文件夹名 + 剪切开关
+        fin_row2 = ttk.Frame(card3); fin_row2.pack(fill='x', padx=12, pady=(4,0))
+        ttk.Label(fin_row2, text='剧名').pack(side='left')
+        self.final_title_var = tk.StringVar()
+        ttk.Entry(fin_row2, textvariable=self.final_title_var).pack(side='left', fill='x', expand=True, padx=(3,8))
+        ttk.Label(fin_row2, text='子文件夹').pack(side='left')
+        self.final_subdir_var = tk.StringVar(value=FINAL_SUBDIR)
+        ttk.Entry(fin_row2, textvariable=self.final_subdir_var, width=10).pack(side='left', padx=(3,8))
+        self.final_move_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(fin_row2, text='剪切(不勾=只复制)', variable=self.final_move_var,
+                       bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
+                       font=('Microsoft YaHei', 9)).pack(side='left')
+        # 匹配预览按钮: 不改任何文件, 只报将要送到哪里
+        ttk.Button(fin_row2, text='匹配预览', command=self.preview_final_match).pack(side='left', padx=(6,0))
+        ttk.Label(card3, text='   导入CSV时会自动用文件名填剧名; “匹配预览”先看看能定位到哪个项目文件夹',
+                  foreground='#888888').pack(anchor='w', padx=12, pady=(1,4))
+
         # 导出设置
         set_row = ttk.Frame(card3); set_row.pack(fill='x', padx=12, pady=6)
         ttk.Label(set_row, text='分辨率').pack(side='left')
@@ -775,6 +975,10 @@ class App:
         return {
             'jianying_path': self.jy_path_var.get().strip(),
             'output_dir': self.outdir_var.get().strip(),
+            'final_root': self.final_root_var.get().strip(),
+            'final_title': self.final_title_var.get().strip(),
+            'final_subdir': self.final_subdir_var.get().strip(),
+            'final_move': bool(self.final_move_var.get()),
             'project': self.project_var.get().strip(),
             'open_dir': bool(self.open_dir_var.get()),
             'auto_run': bool(self.auto_run_var.get()),
@@ -791,6 +995,10 @@ class App:
         mapping = {
             'jianying_path': lambda v: self.jy_path_var.set(str(v)),
             'output_dir': lambda v: self.outdir_var.set(str(v)),
+            'final_root': lambda v: self.final_root_var.set(str(v)),
+            'final_title': lambda v: self.final_title_var.set(str(v)),
+            'final_subdir': lambda v: self.final_subdir_var.set(str(v)),
+            'final_move': lambda v: self.final_move_var.set(bool(v)),
             'project': lambda v: self.project_var.set(str(v)),
             'open_dir': lambda v: self.open_dir_var.set(bool(v)),
             'auto_run': lambda v: self.auto_run_var.set(bool(v)),
@@ -1033,20 +1241,28 @@ class App:
             "5. 项目名归档\n"
             "   填了'项目名'后, 成片自动归档到 输出目录/项目名_日期/,\n"
             "   同目录自动生成 run_log.csv (成功/失败、耗时、时间戳)。\n\n"
-            "6. 暂停/重跑\n"
+            "6. 最终位置 (选填)\n"
+            "   填了“最终位置根目录”(如 O:\\AI漫剧剪辑一组)后, 程序会自动在该目录下\n"
+            "   按“剧名”寻找对应项目文件夹, 把成片剪切到 项目\\人名条\\ 里。\n"
+            "   - 剧名: 导入CSV/TXT时自动用文件名填入, 也可手改\n"
+            "   - 子文件夹: 默认“人名条”, 可改成别的名字\n"
+            "   - 剪切: 默认勾选(输出目录不留原件); 不勾则只复制\n"
+            "   - 匹配预览: 先看看能定位到哪个项目文件夹, 不改任何文件\n"
+            "   匹配失败时不会乱放, 成片留在输出目录并写日志。\n\n"
+            "7. 暂停/重跑\n"
             "   运行中可点'⏸ 暂停'或按空格/Ctrl+P 临时暂停/继续。\n"
             "   跑完若有失败, '↻ 重跑失败'按钮会点亮, 一键重试失败的名字。\n\n"
-            "7. 干跑预览 (v1.2.0)\n"
+            "8. 干跑预览 (v1.2.0)\n"
             "   点'👁 干跑预览'先不操作剪映, 模拟预览每个名字将导出到哪、\n"
             "   有没有同名/路径问题。适合正式跑之前先试一遍。\n\n"
-            "8. 项目模板 (v1.2.0)\n"
-            "   把'项目名+输出目录+勾选项'存成模板, 下拉框一键加载/删除, 复用常用配置。\n\n"
-            "9. 配置备份 (v1.2.0)\n"
-            "   '💾 备份配置'把剪映路径/输出目录/项目名/勾选项导出为单个 .json, \n"
+            "9. 项目模板 (v1.2.0)\n"
+            "   把'项目名+输出目录+最终位置+勾选项'存成模板, 下拉框一键加载/删除, 复用常用配置。\n\n"
+            "10. 配置备份 (v1.2.0)\n"
+            "   '💾 备份配置'把剪映路径/输出目录/项目名/最终位置/勾选项导出为单个 .json, \n"
             "   '📂 恢复配置'换机迁移时一键导入。\n\n"
-            "10. 自动执行\n"
+            "11. 自动执行\n"
             "   勾选'打开草稿并选中后自动开始批量任务', 打开草稿成功即自动跑。\n\n"
-            "11. 完成后打开目录\n"
+            "12. 完成后打开目录\n"
             "   勾选后, 批量完整跑完自动弹出输出文件夹。\n\n"
             "小提示\n"
             "   - 请确保剪映专业版已打开、字幕条已就绪\n"
@@ -1081,6 +1297,24 @@ class App:
                     return i
         return None
 
+    def _fill_title_from_path(self, path):
+        """导入CSV/TXT 时自动把剧名填到“剧名”输入框:
+        优先用文件名(去后缀), 否则用其父文件夹名。
+        仅在剧名框为空或还停在上次的自动值时覆盖, 不抢用户手填内容。"""
+        try:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            cand = clean_title(stem) or os.path.basename(os.path.dirname(path))
+            if not cand:
+                return
+            cur = self.final_title_var.get().strip()
+            if cur and cur != getattr(self, '_auto_title', ''):
+                return   # 用户手填过, 不动
+            self.final_title_var.set(cand)
+            self._auto_title = cand
+            self._log(f'剧名已自动填入: {cand}  (最终位置匹配用)')
+        except Exception:
+            pass
+
     def load_csv(self):
         path = filedialog.askopenfilename(title='选择CSV', filetypes=[('CSV','*.csv'),('所有','*.*')])
         if not path: return
@@ -1113,6 +1347,7 @@ class App:
                 return
             self._set_names(names)
             self._log(f'已从CSV导入{len(names)}个英文名(列:{col})')
+            self._fill_title_from_path(path)
         except Exception as ex:
             messagebox.showerror('导入失败', str(ex))
 
@@ -1131,6 +1366,7 @@ class App:
                 self._log('TXT中未识别到有效英文名'); return
             self._set_names(names)
             self._log(f'已从TXT导入{len(names)}个英文名')
+            self._fill_title_from_path(path)
         except Exception as ex:
             messagebox.showerror('导入失败', str(ex))
 
@@ -1157,6 +1393,39 @@ class App:
     def pick_dir(self):
         d = filedialog.askdirectory()
         if d: self.outdir_var.set(d)
+
+    def pick_final_root(self):
+        """选择最终位置根目录 (如 O:\\AI漫剧剪辑一组)"""
+        d = filedialog.askdirectory(title='选择最终位置根目录 (其下是各项目文件夹)')
+        if d:
+            self.final_root_var.set(d)
+
+    def preview_final_match(self):
+        """匹配预览: 只读探测当前设定会定位到哪个项目文件夹, 不改任何文件"""
+        root = self.final_root_var.get().strip()
+        title = self.final_title_var.get().strip()
+        sub = self.final_subdir_var.get().strip() or FINAL_SUBDIR
+        if not root:
+            messagebox.showinfo('匹配预览', '请先填写最终位置根目录')
+            return
+        if not os.path.isdir(root):
+            messagebox.showerror('匹配预览', f'根目录不存在:\n{root}')
+            return
+        names = self._get_names()
+        proj, why = match_project(root, title, names)
+        if proj:
+            d = os.path.join(root, proj, sub)
+            exist = len(os.listdir(d)) if os.path.isdir(d) else 0
+            act = '剪切' if self.final_move_var.get() else '复制'
+            messagebox.showinfo('匹配预览',
+                f'已定位项目文件夹:\n{proj}\n\n匹配依据: {why}\n\n成片将{act}到:\n{d}\n'
+                f'\n(该目录现有 {exist} 个文件)')
+            self._log(f'✓ 匹配预览: {d}   [{why}]')
+        else:
+            messagebox.showwarning('匹配预览',
+                f'未能定位项目文件夹。\n\n原因: {why}\n剧名: {title or "(空)"}\n\n'
+                f'可手动填写“剧名”, 或在 CSV 文件名里带上剧名。')
+            self._log(f'✗ 匹配预览失败: {why}')
 
     def pick_ffmpeg(self):
         """选择 ffmpeg 可执行文件 (用于导出后转透明通道)"""
@@ -1205,7 +1474,11 @@ class App:
             runner = BatchRunner(None, outdir, log_cb=self._log,
                                  progress_cb=self._on_progress, dry_run=True,
                                  transparent=self.transparent_var.get(),
-                                 ffmpeg_path=self.ffmpeg_var.get().strip())
+                                 ffmpeg_path=self.ffmpeg_var.get().strip(),
+                                 final_root=self.final_root_var.get(),
+                                 final_title=self.final_title_var.get(),
+                                 final_subdir=self.final_subdir_var.get(),
+                                 final_move=self.final_move_var.get())
             results = runner.run(names, project)
         except Exception as ex:
             self._log(f'预览异常: {ex}')
@@ -1252,7 +1525,11 @@ class App:
                                        log_cb=self._log,
                                        progress_cb=self._on_progress,
                                        transparent=self.transparent_var.get(),
-                                       ffmpeg_path=self.ffmpeg_var.get().strip())
+                                       ffmpeg_path=self.ffmpeg_var.get().strip(),
+                                       final_root=self.final_root_var.get(),
+                                       final_title=self.final_title_var.get(),
+                                       final_subdir=self.final_subdir_var.get(),
+                                       final_move=self.final_move_var.get())
             results = self._runner.run(names, project)
         except Exception as ex:
             self._log(f'致命错误: {ex}')
