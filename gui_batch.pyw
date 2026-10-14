@@ -13,6 +13,60 @@ from src.pyJianYingDraft.jianying_controller import JianyingController, Automati
 
 user32 = ctypes.windll.user32
 
+
+def enable_dpi_awareness():
+    """让进程感知 DPI, 否则 2K/4K 屏上界面会被系统位图拉伸而发虚。
+
+    tkinter 默认不声明 DPI 感知(实测为 UNAWARE=0), 高分屏 + 系统缩放时
+    整窗被拉伸, 文字与线条均模糊。必须赶在创建 Tk 根窗口之前调用。
+
+    优先 PER_MONITOR_AWARE_V2(缩放变化时表现最好) -> 系统级 -> 旧 API。
+    返回实际生效的级别名(供日志/测试查看)。
+    """
+    try:
+        # Windows 8.1+: DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+        if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return 'per_monitor_v2'
+    except Exception:
+        pass
+    try:
+        # Windows 8.1+
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:   # 2 = PER_MONITOR_AWARE
+            return 'per_monitor'
+    except Exception:
+        pass
+    try:
+        # Vista+: 系统级
+        if user32.SetProcessDPIAware():
+            return 'system'
+    except Exception:
+        pass
+    return 'none'
+
+
+def get_dpi_scale(root=None):
+    """当前 DPI 缩放比(1.0=100%)。拿不到就返回 1.0。"""
+    try:
+        hwnd = None
+        if root is not None:
+            try:
+                hwnd = root.winfo_id()
+            except Exception:
+                hwnd = None
+        if hwnd and hasattr(user32, 'GetDpiForWindow'):
+            dpi = user32.GetDpiForWindow(hwnd)
+            if dpi:
+                return dpi / 96.0
+    except Exception:
+        pass
+    try:
+        dpi = user32.GetDpiForSystem()
+        if dpi:
+            return dpi / 96.0
+    except Exception:
+        pass
+    return 1.0
+
 def resource_path(rel):
     """打包(exe)与开发(python)两种运行方式下都能定位到资源文件"""
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
@@ -833,285 +887,440 @@ class App:
             root.iconbitmap(resource_path('icon.ico'))
         except Exception:
             pass
-        root.geometry('960x760')
-        root.minsize(820, 620)
+        # 默认尺寸随 DPI 缩放: 高分屏按物理像素给足, 避免一打开就看不到按钮
+        scale = get_dpi_scale(root)
+        w = int(1060 * min(scale, 1.5))
+        h = int(880 * min(scale, 1.5))
+        # 不超过屏幕可用区(留出任务栏)
+        try:
+            sw = root.winfo_screenwidth()
+            sh = root.winfo_screenheight()
+            w = min(w, max(900, sw - 120))
+            h = min(h, max(660, sh - 120))
+        except Exception:
+            pass
+        root.geometry(f'{w}x{h}')
+        root.minsize(860, 640)
         root.resizable(True, True)
         self._setup_theme(root)
 
+    # ------------------------------------------------------------ 主题/样式
+    # 统一间距节奏(像素)。改这里就能整体调疏密, 不用逐处改数字。
+    PAD_X = 14          # 卡片内左右留白
+    PAD_CARD = 8        # 卡片之间的垂直间距
+    PAD_HINT = (0, 2)   # 灰字说明行
+
     def _setup_theme(self, root):
-        """统一界面主题与配色"""
+        """统一界面主题、配色与样式"""
         style = ttk.Style(root)
         try:
-            style.theme_use('clam')
+            style.theme_use('clam')      # clam 才能自定义背景色/边框
         except Exception:
             pass
-        # 基础配色
-        bg = '#f5f7fa'
-        card_bg = '#ffffff'
-        accent = '#2b5be6'      # 主色(蓝)
-        ok_green = '#2ecc71'    # 成功/进度绿
-        err_red = '#e74c3c'     # 停止/错误红
-        text = '#1f2328'
+        # ---- 配色
+        self.C_BG = '#f2f4f7'        # 页面底色(稍冷灰, 衬白卡片)
+        self.C_CARD = '#ffffff'      # 卡片底
+        self.C_HINT = '#8a9099'      # 灰字说明
+        self.C_BORDER = '#e3e6eb'    # 分隔/边框
+        self.C_TEXT = '#1f2328'
+        self.C_TITLE = '#111418'
+        self.C_ACCENT = '#2b5be6'    # 主色(蓝)
+        accent = self.C_ACCENT
+        ok_green = '#2ecc71'         # 成功/进度绿
+        err_red = '#e74c3c'          # 停止/错误红
+        card_bg = self.C_CARD
+        bg = self.C_BG
+        text = self.C_TEXT
         root.configure(bg=bg)
+
+        # 字体随 DPI 放大, 否则高分屏上字太小
+        scale = get_dpi_scale(root)
+        f_base = max(9, int(round(9 * min(scale, 1.6))))
+        f_small = max(8, f_base - 1)
+        f_title = f_base + 1
+        f_big = f_base + 2
+        self._F = {'base': f_base, 'small': f_small, 'title': f_title, 'big': f_big,
+                   'hint': ('Microsoft YaHei', f_small), 'mono': ('Consolas', f_base)}
+
         try:
-            style.configure('.', background=bg, foreground=text, font=('Microsoft YaHei', 9))
+            style.configure('.', background=bg, foreground=text,
+                            font=('Microsoft YaHei', f_base))
             style.configure('TLabel', background=bg, foreground=text)
-            style.configure('Card.TLabelframe', background=card_bg)
-            style.configure('Card.TLabelframe.Label', background=card_bg, foreground='#111111',
-                            font=('Microsoft YaHei', 10, 'bold'))
-            style.configure('TButton', padding=(10, 5), background=bg)
+            # 卡片内专用: 白底, 否则卡片里会出现页面灰的色块
+            style.configure('Card.TLabel', background=card_bg, foreground=text)
+            style.configure('CardHint.TLabel', background=card_bg, foreground=self.C_HINT)
+            # 卡片内容器也必需白底: clam 下 ttk.Frame 会继承页面灰, 在卡片里成灰块
+            style.configure('Card.TFrame', background=card_bg)
+            style.configure('Card.TCheckbutton', background=card_bg, foreground=text)
+            style.map('Card.TCheckbutton', background=[('active', card_bg)])
+            style.configure('Card.TLabelframe.Label', background=card_bg, foreground=self.C_TITLE,
+                            font=('Microsoft YaHei', f_title, 'bold'))
+            style.configure('TCheckbutton', background=card_bg, foreground=text)
+            style.map('TCheckbutton', background=[('active', card_bg)])
+            style.configure('TLabelframe', background=card_bg, bordercolor=self.C_BORDER,
+                            relief='solid', borderwidth=1)
+            style.configure('TLabelframe.Label', background=card_bg, foreground=self.C_TITLE,
+                            font=('Microsoft YaHei', f_title, 'bold'))
+            # 普通描边按钮
+            style.configure('TButton', padding=(10, 5), background='#fbfcfd',
+                            bordercolor=self.C_BORDER, relief='solid', borderwidth=1)
             style.map('TButton',
-                      background=[('active', '#e9edf2'), ('pressed', '#dde3ea')])
-            # 开始按钮(绿)
-            style.configure('Start.TButton', background=ok_green, foreground='white',
-                            font=('Microsoft YaHei', 10, 'bold'), padding=(14, 7))
-            style.map('Start.TButton',
-                      background=[('active', '#27ae60'), ('pressed', '#219a52'), ('disabled', '#b8c7bf')])
-            # 停止按钮(红)
-            style.configure('Stop.TButton', background=err_red, foreground='white',
-                            font=('Microsoft YaHei', 10, 'bold'), padding=(14, 7))
-            style.map('Stop.TButton',
-                      background=[('active', '#c0392b'), ('pressed', '#b03a2e'), ('disabled', '#d8bfbc')])
-            # 重跑按钮(橙)
-            style.configure('Rerun.TButton', background='#f39c12', foreground='white',
-                            font=('Microsoft YaHei', 10, 'bold'), padding=(14, 7))
-            style.map('Rerun.TButton',
-                      background=[('active', '#e67e22'), ('pressed', '#d35400'), ('disabled', '#e8d5b8')])
-            # 暂停按钮(蓝灰)
-            style.configure('Pause.TButton', background='#8e8ea0', foreground='white',
-                            font=('Microsoft YaHei', 10, 'bold'), padding=(14, 7))
-            style.map('Pause.TButton',
-                      background=[('active', '#6e6e80'), ('pressed', '#5a5a6a'), ('disabled', '#c6c6d0')])
-            # 干跑预览按钮(青)
-            style.configure('Preview.TButton', background='#16a085', foreground='white',
-                            font=('Microsoft YaHei', 10, 'bold'), padding=(14, 7))
-            style.map('Preview.TButton',
-                      background=[('active', '#138d75'), ('pressed', '#0e6e5c'), ('disabled', '#b5d8d0')])
+                      background=[('active', '#eef2f7'), ('pressed', '#e2e8f0')],
+                      bordercolor=[('active', '#c9d3e0')])
+            # 主按钮(各大色块)
+            for name, base, hover, press, dis in (
+                ('Start.TButton',   ok_green,  '#27ae60', '#219a52', '#b8c7bf'),
+                ('Stop.TButton',    err_red,   '#c0392b', '#b03a2e', '#d8bfbc'),
+                ('Rerun.TButton',   '#f39c12', '#e67e22', '#d35400', '#e8d5b8'),
+                ('Pause.TButton',   '#8e8ea0', '#6e6e80', '#5a5a6a', '#c6c6d0'),
+                ('Preview.TButton', '#16a085', '#138d75', '#0e6e5c', '#b5d8d0'),
+            ):
+                style.configure(name, background=base, foreground='white',
+                                font=('Microsoft YaHei', f_big, 'bold'), padding=(14, 7),
+                                relief='flat', borderwidth=0)
+                style.map(name, background=[('active', hover), ('pressed', press), ('disabled', dis)])
+            # 细边框: 输入框/下拉框
+            style.configure('TEntry', fieldbackground='#ffffff', bordercolor=self.C_BORDER,
+                            relief='solid', borderwidth=1, padding=3)
+            style.configure('TCombobox', fieldbackground='#ffffff', bordercolor=self.C_BORDER,
+                            padding=2, arrowcolor='#6b7280')
+            style.map('TCombobox', fieldbackground=[('readonly', '#ffffff')])
             # 进度条
             style.configure('Highlight.Horizontal.TProgressbar',
-                            troughcolor='#e0e0e0', background=ok_green, thickness=22)
+                            troughcolor='#e6e9ee', background=ok_green, thickness=20,
+                            bordercolor='#e6e9ee', lightcolor=ok_green, darkcolor=ok_green)
+            # 折叠区的展开/收起小按钮
+            style.configure('Fold.TButton', padding=(2, 0), font=('Microsoft YaHei', f_small),
+                            background=card_bg, relief='flat', borderwidth=0)
+            style.map('Fold.TButton',
+                      background=[('active', card_bg), ('pressed', card_bg)],
+                      foreground=[('active', accent)])
         except Exception:
             pass
 
-        # ============ 主容器: 左操作区 + 右日志区 ============
-        main = ttk.Frame(root); main.pack(fill='both', expand=True, padx=12, pady=(8,10))
-        left = ttk.Frame(main); left.pack(side='left', fill='both', expand=True)
-        right = ttk.Frame(main); right.pack(side='right', fill='y', padx=(10,0))
+        self._build_ui(root, bg)
 
-        # ============ 卡片① 剪映连接 ============
-        card1 = ttk.Labelframe(left, text='剪映连接', style='Card.TLabelframe')
-        card1.pack(fill='x', padx=0, pady=(0,0))
+    def _hint(self, parent, text, **pk):
+        """灰字说明行(统一字号/颜色/间距; 卡片内白底避免色块)"""
+        lb = ttk.Label(parent, text=text, style='CardHint.TLabel',
+                       font=('Microsoft YaHei', self._F['small']))
+        lb.pack(anchor='w', **pk)
+        return lb
 
-        # 链接状态 + 启动按钮
-        link_row = ttk.Frame(card1); link_row.pack(fill='x', padx=12, pady=(8,3))
+    def _cbtn(self, parent, text, var, **pk):
+        """白色背景的勾选框。
+
+        用原生 tk.Checkbutton 而非 ttk: clam 主题的 ttk 勾选框在“选中/未选中”
+        都画成方框(X 形), 状态辨识度差; 原生的是“方框+打勾”, 一眼可辨。
+        """
+        cb = tk.Checkbutton(parent, text=text, variable=var,
+                            bg=self.C_CARD, activebackground=self.C_CARD,
+                            selectcolor=self.C_ACCENT, bd=0, highlightthickness=0,
+                            anchor='w', font=('Microsoft YaHei', self._F['base']))
+        cb.pack(anchor='w', **pk)
+        return cb
+
+    def _retint_card_widgets(self, node):
+        """把卡片内所有标签/勾选框统一成白底。
+
+        ttk 背景由 style 决定, 全局 TLabel 用的是页面灰,
+        放进白色卡片(含卡片内的折叠分组 Frame)就会形成明显色块。
+        这里递归全树统一重染 —— 不能只扫一层, 折叠区的 body 是子级 Frame。
+        """
+        try:
+            children = node.winfo_children()
+        except Exception:
+            return
+        for c in children:
+            try:
+                cls = c.winfo_class()
+                if cls in ('TLabel', 'TCheckbutton'):
+                    st = ''
+                    try:
+                        st = str(c.cget('style'))
+                    except Exception:
+                        pass
+                    # 已显式指定 Hint 样式的保留其灰色字色, 但仍需白底
+                    if cls == 'TCheckbutton':
+                        if st != 'Card.TCheckbutton':
+                            c.configure(style='Card.TCheckbutton')
+                    else:
+                        if st == 'CardHint.TLabel':
+                            pass
+                        elif st != 'Card.TLabel':
+                            c.configure(style='Card.TLabel')
+                elif cls == 'TFrame':
+                    # 卡片内容器同样要白底(clam 下 TFrame 默认继承页面灰)
+                    st = ''
+                    try:
+                        st = str(c.cget('style'))
+                    except Exception:
+                        pass
+                    if st != 'Card.TFrame':
+                        c.configure(style='Card.TFrame')
+            except Exception:
+                pass
+            self._retint_card_widgets(c)
+
+    def _fold_section(self, card, title, opened=True):
+        """在卡片里插一个可折叠小节, 返回放内容的 Frame。
+        用于把长卡片分成几组, 默认只展开常用的那组, 降低拥挤感。"""
+        head = ttk.Frame(card)
+        head.pack(fill='x', padx=self.PAD_X, pady=(8, 0))
+        body = ttk.Frame(card)
+        state = {'open': opened}
+
+        # 标题左侧的蓝色细条, 作为分组视觉锚点
+        bar = tk.Frame(head, bg='#c9d3e0', width=3, height=13)
+        bar.pack(side='left', padx=(0, 6))
+        arrow = ttk.Button(head, text='▾' if opened else '▸', style='Fold.TButton', width=2)
+        arrow.pack(side='left')
+        lb = ttk.Label(head, text=title, font=('Microsoft YaHei', self._F['base'], 'bold'),
+                       foreground='#39414d')
+        lb.pack(side='left', padx=(2, 0))
+        line = tk.Frame(head, bg=self.C_BORDER, height=1)
+        line.pack(side='left', fill='x', expand=True, padx=(8, 0))
+
+        def apply():
+            if state['open']:
+                body.pack(fill='x', after=head)
+            else:
+                body.pack_forget()
+            arrow.config(text='▾' if state['open'] else '▸')
+
+        def toggle(_e=None):
+            state['open'] = not state['open']
+            apply()
+
+        arrow.config(command=toggle)
+        lb.bind('<Button-1>', toggle)
+        head.bind('<Button-1>', toggle)
+        apply()
+        return body
+
+    # ------------------------------------------------------------ 界面搭建
+    def _build_ui(self, root, bg):
+        """搭建界面。
+
+        结构要点(改了会直接影响“小窗口能不能操作”):
+          root
+          └ main
+             ├ left_zone (fill=both, expand)
+             │   ├ scroll(卡片区)  <- 纵向可滚动, 防止小窗口溢出看不见
+             │   └ bottom(控制区)  <- 固定在底部, 永远可见(开始/停止/进度/时间)
+             └ right(日志)
+        """
+        main = ttk.Frame(root); main.pack(fill='both', expand=True, padx=12, pady=(10, 10))
+
+        # ============ 右: 日志 ============
+        right = ttk.Frame(main); right.pack(side='right', fill='y', padx=(12, 0))
+        log_card = ttk.Labelframe(right, text='日志', style='TLabelframe')
+        log_card.pack(fill='both', expand=True)
+        log_btns = ttk.Frame(log_card); log_btns.pack(fill='x', padx=10, pady=(8, 0))
+        ttk.Button(log_btns, text='复制', command=self.copy_log).pack(side='left')
+        ttk.Button(log_btns, text='导出', command=self.export_log).pack(side='left', padx=(5, 0))
+        ttk.Button(log_btns, text='清空', command=self.clear_log).pack(side='left', padx=(5, 0))
+        self.log_box = tk.Text(log_card, width=34, font=self._F['mono'], state='disabled',
+                               bg='#ffffff', relief='flat', bd=0, wrap='word',
+                               highlightthickness=1, highlightbackground=self.C_BORDER,
+                               highlightcolor=self.C_BORDER)
+        self.log_box.pack(fill='both', expand=True, padx=10, pady=(6, 10))
+
+        # ============ 左: 卡片区(可滚动) + 底部控制区(固定) ============
+        left_zone = ttk.Frame(main); left_zone.pack(side='left', fill='both', expand=True)
+        scroll, left = self._scrollable_left(left_zone, bg)
+        scroll.pack(fill='both', expand=True)
+        bottom = ttk.Frame(left_zone); bottom.pack(side='bottom', fill='x', pady=(8, 0))
+
+        # ---------- 卡片① 剪映连接 ----------
+        card1 = ttk.Labelframe(left, text='剪映连接', style='TLabelframe')
+        card1.pack(fill='x', padx=0, pady=(0, self.PAD_CARD))
+        link_row = ttk.Frame(card1); link_row.pack(fill='x', padx=self.PAD_X, pady=(8, 3))
         ttk.Label(link_row, text='状态').pack(side='left')
-        self.link_canvas = tk.Canvas(link_row, width=18, height=18, bg='#ffffff', highlightthickness=0)
-        self.link_canvas.pack(side='left', padx=(6,4))
-        self.link_dot = self.link_canvas.create_oval(2, 2, 16, 16, fill='#cccccc', outline='')
+        self.link_canvas = tk.Canvas(link_row, width=16, height=16, bg=self.C_CARD,
+                                     highlightthickness=0)
+        self.link_canvas.pack(side='left', padx=(6, 4))
+        self.link_dot = self.link_canvas.create_oval(1, 1, 15, 15, fill='#c9ced6', outline='')
         self.link_status_var = tk.StringVar(value='检测中...')
         ttk.Label(link_row, textvariable=self.link_status_var,
-                  font=('Microsoft YaHei', 10, 'bold')).pack(side='left')
-        # 右侧放帮助
+                  font=('Microsoft YaHei', self._F['base'], 'bold')).pack(side='left')
         ttk.Button(link_row, text='帮助', command=self.show_help).pack(side='right')
 
-        # 剪映路径
-        ttk.Label(card1, text='剪映程序路径 (用于启动剪映; 不填则自动探测)').pack(anchor='w', padx=12, pady=(3,2))
-        jy_row = ttk.Frame(card1); jy_row.pack(fill='x', padx=12, pady=(0,3))
+        ttk.Label(card1, text='剪映程序路径').pack(anchor='w', padx=self.PAD_X, pady=(4, 2))
+        self._hint(card1, '不填则自动探测; 用于“启动剪映”', padx=self.PAD_X, pady=(0, 3))
+        jy_row = ttk.Frame(card1); jy_row.pack(fill='x', padx=self.PAD_X, pady=(0, 3))
         self.jy_path_var = tk.StringVar()
-        ttk.Entry(jy_row, textvariable=self.jy_path_var).pack(side='left', fill='x', expand=True, padx=(0,5))
-        ttk.Button(jy_row, text='浏览', command=self.pick_jianying).pack(side='left', padx=(0,3))
-        ttk.Button(jy_row, text='自动探测', command=self.auto_detect_jianying).pack(side='left', padx=(0,3))
+        ttk.Entry(jy_row, textvariable=self.jy_path_var).pack(side='left', fill='x', expand=True, padx=(0, 5))
+        ttk.Button(jy_row, text='浏览', command=self.pick_jianying).pack(side='left', padx=(0, 3))
+        ttk.Button(jy_row, text='自动探测', command=self.auto_detect_jianying).pack(side='left', padx=(0, 3))
         ttk.Button(jy_row, text='启动剪映', command=self.launch_jianying).pack(side='left')
 
-        # 草稿名自动打开
-        ttk.Label(card1, text='草稿名 (留空跳过; 用于自动打开草稿并选中字幕条)').pack(anchor='w', padx=12, pady=(3,2))
-        drow = ttk.Frame(card1); drow.pack(fill='x', padx=12, pady=(0,3))
+        ttk.Label(card1, text='草稿名 (留空跳过)').pack(anchor='w', padx=self.PAD_X, pady=(4, 2))
+        self._hint(card1, '用于自动打开草稿并选中字幕条', padx=self.PAD_X, pady=(0, 3))
+        drow = ttk.Frame(card1); drow.pack(fill='x', padx=self.PAD_X, pady=(0, 3))
         self.draft_var = tk.StringVar()
         self.draft_history = self._load_history()
         self.draft_combo = ttk.Combobox(drow, textvariable=self.draft_var, values=self.draft_history, width=20)
-        self.draft_combo.pack(side='left', fill='x', expand=True, padx=(0,5))
+        self.draft_combo.pack(side='left', fill='x', expand=True, padx=(0, 5))
         self.draft_combo.bind('<Return>', lambda e: self.open_draft())
         ttk.Button(drow, text='打开草稿并选字幕', command=self.open_draft).pack(side='left')
-        # 勾选后: 打开草稿成功即自动开始批量
         self.auto_run_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(card1, text='打开草稿并选中后自动开始批量任务', variable=self.auto_run_var,
-                       bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
-                       font=('Microsoft YaHei', 9)).pack(anchor='w', padx=12, pady=(0,8))
+        self._cbtn(card1, '打开草稿并选中后自动开始批量', self.auto_run_var, padx=self.PAD_X, pady=(2, 8))
 
-        # ============ 卡片② 名字列表 ============
-        card2 = ttk.Labelframe(left, text='名字列表', style='Card.TLabelframe')
-        card2.pack(fill='x', padx=0, pady=(8,0))
-        btns = ttk.Frame(card2); btns.pack(anchor='w', padx=12, pady=(10,2))
-        ttk.Button(btns, text='从CSV导入', command=self.load_csv).pack(side='left', padx=(0,5))
-        ttk.Button(btns, text='从TXT导入', command=self.load_txt).pack(side='left', padx=(0,5))
-        ttk.Button(btns, text='粘贴', command=self.paste_names).pack(side='left', padx=(0,5))
+        # ---------- 卡片② 名字列表 ----------
+        card2 = ttk.Labelframe(left, text='名字列表', style='TLabelframe')
+        card2.pack(fill='x', padx=0, pady=(0, self.PAD_CARD))
+        btns = ttk.Frame(card2); btns.pack(anchor='w', padx=self.PAD_X, pady=(8, 3))
+        ttk.Button(btns, text='从CSV导入', command=self.load_csv).pack(side='left', padx=(0, 5))
+        ttk.Button(btns, text='从TXT导入', command=self.load_txt).pack(side='left', padx=(0, 5))
+        ttk.Button(btns, text='粘贴', command=self.paste_names).pack(side='left', padx=(0, 5))
         ttk.Button(btns, text='清空', command=self.clear_names).pack(side='left')
-        ttk.Label(btns, text='每行一个名字', foreground='#888888').pack(side='right')
-
-        self.name_box = tk.Text(card2, height=5, font=('Consolas', 10), bg='#ffffff', relief='solid', bd=1)
-        self.name_box.pack(fill='x', padx=12, pady=(0,10))
-        # 高亮样式: 运行中(黄底黑字) / 成功(浅绿) / 失败(浅红)
+        ttk.Label(btns, text='每行一个名字', foreground=self.C_HINT).pack(side='right')
+        self.name_box = tk.Text(card2, height=5, font=self._F['mono'], bg='#ffffff',
+                                relief='flat', bd=0, highlightthickness=1,
+                                highlightbackground=self.C_BORDER, highlightcolor=self.C_BORDER)
+        self.name_box.pack(fill='x', padx=self.PAD_X, pady=(0, 8))
         self.name_box.tag_configure('hl_run', background='#fff3cd', foreground='#856404')
         self.name_box.tag_configure('hl_ok', background='#d4edda', foreground='#155724')
         self.name_box.tag_configure('hl_fail', background='#f8d7da', foreground='#721c24')
 
-        # ============ 卡片③ 输出与导出 ============
-        card3 = ttk.Labelframe(left, text='输出与导出', style='Card.TLabelframe')
-        card3.pack(fill='x', padx=0, pady=(8,0))
+        # ---------- 卡片③ 输出与归档 ----------
+        card3 = ttk.Labelframe(left, text='输出与归档', style='TLabelframe')
+        card3.pack(fill='x', padx=0, pady=(0, self.PAD_CARD))
 
-        # 输出目录
-        ttk.Label(card3, text='输出目录 (成片保存位置)').pack(anchor='w', padx=12, pady=(8,2))
-        row = ttk.Frame(card3); row.pack(fill='x', padx=12)
+        # 分组 A: 保存位置(常用, 默认展开)
+        secA = self._fold_section(card3, '保存位置', opened=True)
+        ttk.Label(secA, text='输出目录 (成片先存这里)').pack(anchor='w', padx=self.PAD_X, pady=(6, 2))
+        row = ttk.Frame(secA); row.pack(fill='x', padx=self.PAD_X)
         self.outdir_var = tk.StringVar(value=DEFAULT_OUTDIR)
-        ttk.Entry(row, textvariable=self.outdir_var).pack(side='left', fill='x', expand=True, padx=(0,5))
+        ttk.Entry(row, textvariable=self.outdir_var).pack(side='left', fill='x', expand=True, padx=(0, 5))
         ttk.Button(row, text='浏览', command=self.pick_dir).pack(side='left')
-
-        # 项目名 (用于「项目+时间」自动归档)
-        ttk.Label(card3, text='项目名 (选填; 填了则自动归档到 输出目录/项目名_日期/)').pack(anchor='w', padx=12, pady=(6,2))
-        proj_row = ttk.Frame(card3); proj_row.pack(fill='x', padx=12)
-        self.project_var = tk.StringVar()
-        ttk.Entry(proj_row, textvariable=self.project_var).pack(side='left', fill='x', expand=True, padx=(0,5))
-        ttk.Label(proj_row, text='如: 项目A_2026', foreground='#888888').pack(side='left')
-
-        # 最终位置: 设定根目录后自动匹配项目文件夹, 成片剪切到 项目\人名条\
-        ttk.Label(card3, text='最终位置根目录 (选填; 如 O:\\AI漫剧剪辑一组。填了则自动匹配项目文件夹, 成片剪切进去)').pack(anchor='w', padx=12, pady=(6,2))
-        fin_row = ttk.Frame(card3); fin_row.pack(fill='x', padx=12)
+        ttk.Label(secA, text='最终位置根目录').pack(anchor='w', padx=self.PAD_X, pady=(8, 2))
+        self._hint(secA, '填了则按剧名自动匹配项目文件夹, 成片剪切到 项目\\人名条\\',
+                   padx=self.PAD_X, pady=(0, 3))
+        fin_row = ttk.Frame(secA); fin_row.pack(fill='x', padx=self.PAD_X, pady=(0, 8))
         self.final_root_var = tk.StringVar()
-        ttk.Entry(fin_row, textvariable=self.final_root_var).pack(side='left', fill='x', expand=True, padx=(0,5))
-        ttk.Button(fin_row, text='浏览', command=self.pick_final_root).pack(side='left', padx=(0,3))
+        ttk.Entry(fin_row, textvariable=self.final_root_var).pack(side='left', fill='x', expand=True, padx=(0, 5))
+        ttk.Button(fin_row, text='浏览', command=self.pick_final_root).pack(side='left', padx=(0, 3))
         ttk.Button(fin_row, text='清除', command=lambda: self.final_root_var.set('')).pack(side='left')
 
-        # 剧名 (用于匹配项目文件夹) + 子文件夹名 + 剪切开关
-        fin_row2 = ttk.Frame(card3); fin_row2.pack(fill='x', padx=12, pady=(4,0))
-        ttk.Label(fin_row2, text='剧名').pack(side='left')
+        # 分组 B: 归档规则(默认折叠)
+        secB = self._fold_section(card3, '归档规则', opened=False)
+        ttk.Label(secB, text='剧名 (匹配项目文件夹)').pack(anchor='w', padx=self.PAD_X, pady=(6, 2))
+        fin_row2 = ttk.Frame(secB); fin_row2.pack(fill='x', padx=self.PAD_X)
         self.final_title_var = tk.StringVar()
-        ttk.Entry(fin_row2, textvariable=self.final_title_var).pack(side='left', fill='x', expand=True, padx=(3,8))
+        ttk.Entry(fin_row2, textvariable=self.final_title_var).pack(side='left', fill='x', expand=True, padx=(0, 8))
         ttk.Label(fin_row2, text='子文件夹').pack(side='left')
         self.final_subdir_var = tk.StringVar(value=FINAL_SUBDIR)
-        ttk.Entry(fin_row2, textvariable=self.final_subdir_var, width=10).pack(side='left', padx=(3,8))
-        self.final_move_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(fin_row2, text='剪切(不勾=只复制)', variable=self.final_move_var,
-                       bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
-                       font=('Microsoft YaHei', 9)).pack(side='left')
-        # 匹配预览按钮: 不改任何文件, 只报将要送到哪里
-        ttk.Button(fin_row2, text='匹配预览', command=self.preview_final_match).pack(side='left', padx=(6,0))
-
-        # 同名处理 + 投送时机说明
-        fin_row3 = ttk.Frame(card3); fin_row3.pack(fill='x', padx=12, pady=(4,0))
+        ttk.Entry(fin_row2, textvariable=self.final_subdir_var, width=10).pack(side='left', padx=(3, 8))
+        ttk.Button(fin_row2, text='匹配预览', command=self.preview_final_match).pack(side='left')
+        self._hint(secB, '导入CSV时自动用文件名填剧名; “匹配预览”先看会送到哪个项目',
+                   padx=self.PAD_X, pady=(2, 4))
+        fin_row3 = ttk.Frame(secB); fin_row3.pack(fill='x', padx=self.PAD_X, pady=(0, 4))
         ttk.Label(fin_row3, text='同名处理').pack(side='left')
         self.conflict_var = tk.StringVar(value=DEFAULT_CONFLICT_LABEL)
         ttk.Combobox(fin_row3, textvariable=self.conflict_var, values=list(CONFLICT_LABELS),
-                     state='readonly', width=8).pack(side='left', padx=(3,10))
-        ttk.Label(fin_row3, text='（最终目录已有同名文件时怎么处理）', foreground='#888888').pack(side='left')
-        ttk.Label(card3, text='   导入CSV时会自动用文件名填剧名; “匹配预览”先看看能定位到哪个项目文件夹',
-                  foreground='#888888').pack(anchor='w', padx=12, pady=(1,1))
-        ttk.Label(card3, text='   投送时机: 全部导出完成后统一剪切（输出目录里的其它文件不会被搬）',
-                  foreground='#888888').pack(anchor='w', padx=12, pady=(0,4))
+                     state='readonly', width=8).pack(side='left', padx=(3, 10))
+        ttk.Label(fin_row3, text='最终目录已有同名文件时', foreground=self.C_HINT).pack(side='left')
+        self.final_move_var = tk.BooleanVar(value=True)
+        self._cbtn(secB, '剪切(不勾=只复制到最终位置)', self.final_move_var, padx=self.PAD_X, pady=(0, 4))
+        self._hint(secB, '投送时机: 全部导出完成后统一剪切; 输出目录里的其它文件不会被搬',
+                   padx=self.PAD_X, pady=(0, 8))
 
-        # 导出设置
-        set_row = ttk.Frame(card3); set_row.pack(fill='x', padx=12, pady=6)
+        # 分组 C: 高级选项(默认折叠)
+        secC = self._fold_section(card3, '高级选项', opened=False)
+        ttk.Label(secC, text='项目名 (选填)').pack(anchor='w', padx=self.PAD_X, pady=(6, 2))
+        self._hint(secC, '填了则成片先归到 输出目录/项目名_日期/', padx=self.PAD_X, pady=(0, 3))
+        proj_row = ttk.Frame(secC); proj_row.pack(fill='x', padx=self.PAD_X, pady=(0, 4))
+        self.project_var = tk.StringVar()
+        ttk.Entry(proj_row, textvariable=self.project_var).pack(side='left', fill='x', expand=True, padx=(0, 5))
+        ttk.Label(proj_row, text='如: 项目A_2026', foreground=self.C_HINT).pack(side='left')
+
+        set_row = ttk.Frame(secC); set_row.pack(fill='x', padx=self.PAD_X, pady=(2, 4))
         ttk.Label(set_row, text='分辨率').pack(side='left')
         self.res_var = tk.StringVar(value='不修改')
-        ttk.Combobox(set_row, textvariable=self.res_var, values=['不修改','1080P','720P','4K'], width=8).pack(side='left', padx=(3,14))
+        ttk.Combobox(set_row, textvariable=self.res_var,
+                     values=['不修改','1080P','720P','4K'], width=8).pack(side='left', padx=(3, 14))
         ttk.Label(set_row, text='帧率').pack(side='left')
         self.fps_var = tk.StringVar(value='不修改')
-        ttk.Combobox(set_row, textvariable=self.fps_var, values=['不修改','25','30','60'], width=8).pack(side='left', padx=(3,0))
-        # 完成后自动打开成品目录
-        self.open_dir_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(set_row, text='完成后打开目录', variable=self.open_dir_var,
-                       bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
-                       font=('Microsoft YaHei', 9)).pack(side='left', padx=14)
+        ttk.Combobox(set_row, textvariable=self.fps_var,
+                     values=['不修改','25','30','60'], width=8).pack(side='left', padx=(3, 0))
 
-        # 断点续跑: 已出过的名字直接跳过, 中断后重跑不重复导出
-        resume_row = ttk.Frame(card3); resume_row.pack(fill='x', padx=12, pady=(0,3))
-        self.resume_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(resume_row, text='⏭ 断点续跑(已有成片的名字直接跳过)', variable=self.resume_var,
-                       bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
-                       font=('Microsoft YaHei', 9)).pack(side='left')
-        ttk.Label(resume_row, text='(中断后重跑不重复导出; 已生成的名字不会被覆盖)',
-                  foreground='#888888').pack(side='left', padx=4)
-
-        # 导出后转透明通道 (第三版: 可选, 用 ffmpeg colorkey 抠黑转 ProRes 4444 MOV)
-        trans_row = ttk.Frame(card3); trans_row.pack(fill='x', padx=12, pady=(0,3))
         self.transparent_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(trans_row, text='☑ 导出后转透明通道(MOV)', variable=self.transparent_var,
-                       bg='#ffffff', activebackground='#ffffff', bd=0, highlightthickness=0,
-                       font=('Microsoft YaHei', 9)).pack(side='left')
-        ttk.Label(trans_row, text='ffmpeg:', foreground='#888888').pack(side='left', padx=(8,3))
+        self._cbtn(secC, '导出后转透明通道(MOV)', self.transparent_var, padx=self.PAD_X, pady=(2, 2))
+        self._hint(secC, '仅去纯黑底, 光晕字幕可能有残留', padx=self.PAD_X + 18, pady=(0, 3))
+        trans_row = ttk.Frame(secC); trans_row.pack(fill='x', padx=self.PAD_X, pady=(0, 4))
+        ttk.Label(trans_row, text='ffmpeg', foreground=self.C_HINT).pack(side='left')
         self.ffmpeg_var = tk.StringVar(value=detect_ffmpeg_path())
-        ttk.Entry(trans_row, textvariable=self.ffmpeg_var, width=22).pack(side='left', fill='x', expand=True, padx=(0,3))
+        ttk.Entry(trans_row, textvariable=self.ffmpeg_var, width=22).pack(
+            side='left', fill='x', expand=True, padx=(4, 3))
         ttk.Button(trans_row, text='浏览', command=self.pick_ffmpeg).pack(side='left')
-        # 提示: 透明转换对纯黑底素材效果最好; 带光晕/渐变的字幕条可能有边缘残留
-        ttk.Label(trans_row, text='(仅去纯黑底, 光晕字幕可能有残留)', foreground='#bbbbbb').pack(side='left', padx=4)
 
-        # 配置备份/恢复 (第二版: 配置中心化)
-        cfg_row = ttk.Frame(card3); cfg_row.pack(fill='x', padx=12, pady=(0,4))
+        cfg_row = ttk.Frame(secC); cfg_row.pack(fill='x', padx=self.PAD_X, pady=(0, 4))
         ttk.Label(cfg_row, text='配置').pack(side='left')
-        ttk.Button(cfg_row, text='💾 备份配置', command=self.backup_config).pack(side='left', padx=(6,3))
-        ttk.Button(cfg_row, text='📂 恢复配置', command=self.restore_config).pack(side='left', padx=(0,3))
-        ttk.Label(cfg_row, text='(导出/导入单个 .json, 换机迁移用)', foreground='#888888').pack(side='left', padx=4)
+        ttk.Button(cfg_row, text='备份', command=self.backup_config).pack(side='left', padx=(6, 3))
+        ttk.Button(cfg_row, text='恢复', command=self.restore_config).pack(side='left', padx=(0, 3))
+        ttk.Label(cfg_row, text='换机迁移用', foreground=self.C_HINT).pack(side='left', padx=4)
 
-        # 项目模板 (第二版: 预设保存/加载)
-        tpl_row = ttk.Frame(card3); tpl_row.pack(fill='x', padx=12, pady=(0,6))
+        tpl_row = ttk.Frame(secC); tpl_row.pack(fill='x', padx=self.PAD_X, pady=(0, 8))
         ttk.Label(tpl_row, text='项目模板').pack(side='left')
         self.tpl_combo = ttk.Combobox(tpl_row, width=16, state='readonly')
-        self.tpl_combo.pack(side='left', padx=(6,3))
+        self.tpl_combo.pack(side='left', padx=(6, 3))
         self.tpl_combo.bind('<<ComboboxSelected>>', self._tpl_selected)
-        ttk.Button(tpl_row, text='💾 存为模板', command=self.save_template).pack(side='left', padx=(0,3))
-        ttk.Button(tpl_row, text='🗑 删除模板', command=self.delete_template).pack(side='left')
+        ttk.Button(tpl_row, text='存为模板', command=self.save_template).pack(side='left', padx=(0, 3))
+        ttk.Button(tpl_row, text='删除模板', command=self.delete_template).pack(side='left')
 
-        # ============ 控制按钮 ============
-        ctl = ttk.Frame(left); ctl.pack(fill='x', padx=0, pady=(8,0))
+        # ---------- 底部固定控制区(不随滚动, 永远可见) ----------
+        # 分隔线, 把固定区与滚动内容在视觉上分开
+        tk.Frame(bottom, bg=self.C_BORDER, height=1).pack(fill='x', pady=(0, 8))
+
+        self.pbar = ttk.Progressbar(bottom, mode='determinate',
+                                    style='Highlight.Horizontal.TProgressbar')
+        self.pbar.pack(fill='x')
+        # 进度主文字(左) + 紧凑计数(右); 两者均置于整宽行, 避免被按钮行挤掉
+        row_info = ttk.Frame(bottom); row_info.pack(fill='x', pady=(4, 0))
+        self.progress_text_var = tk.StringVar(value='就绪')
+        ttk.Label(row_info, textvariable=self.progress_text_var,
+                  font=('Microsoft YaHei', self._F['big'], 'bold')).pack(side='left')
+        self.prog_var = tk.StringVar(value='')
+        ttk.Label(row_info, textvariable=self.prog_var, foreground='#5b6270').pack(side='right')
+        self.time_var = tk.StringVar(value='')
+        ttk.Label(bottom, textvariable=self.time_var, foreground='#5b6270',
+                  font=('Microsoft YaHei', self._F['small'])).pack(anchor='w')
+
+        ctl = ttk.Frame(bottom); ctl.pack(fill='x', pady=(8, 0))
         self.start_btn = ttk.Button(ctl, text='▶ 开始批量', command=self.start, style='Start.TButton')
         self.start_btn.pack(side='left')
         self.preview_btn = ttk.Button(ctl, text='👁 干跑预览', command=self.preview, style='Preview.TButton')
-        self.preview_btn.pack(side='left', padx=(0,8))
+        self.preview_btn.pack(side='left', padx=(6, 0))
         self.stop_btn = ttk.Button(ctl, text='■ 停止', command=self.stop, state='disabled', style='Stop.TButton')
-        self.stop_btn.pack(side='left', padx=8)
-        # 暂停/继续按钮 (运行中可用; 或按 Ctrl+P / 空格)
+        self.stop_btn.pack(side='left', padx=(6, 0))
         self.pause_btn = ttk.Button(ctl, text='⏸ 暂停', command=self.toggle_pause,
                                     state='disabled', style='Pause.TButton')
-        self.pause_btn.pack(side='left', padx=(0,8))
-        # 失败一键重跑按钮 (跑完有失败时自动点亮)
+        self.pause_btn.pack(side='left', padx=(6, 0))
         self.rerun_btn = ttk.Button(ctl, text='↻ 重跑失败', command=self.rerun_failed,
                                     state='disabled', style='Rerun.TButton')
-        self.rerun_btn.pack(side='left', padx=(0,8))
-        self.prog_var = tk.StringVar(value='就绪')
-        ttk.Label(ctl, textvariable=self.prog_var, font=('Microsoft YaHei', 9)).pack(side='left', padx=10)
+        self.rerun_btn.pack(side='left', padx=(6, 0))
 
-        # ============ 进度条 ============
-        pbar_wrap = ttk.Frame(left); pbar_wrap.pack(side='bottom', fill='x', padx=0, pady=(8,0))
-        self.pbar = ttk.Progressbar(pbar_wrap, mode='determinate',
-                                    style='Highlight.Horizontal.TProgressbar')
-        self.pbar.pack(fill='x')
-        # 进度文字 (百分比 + 计数)
-        self.progress_text_var = tk.StringVar(value='就绪')
-        ttk.Label(pbar_wrap, textvariable=self.progress_text_var,
-                  font=('Microsoft YaHei', 11, 'bold')).pack(anchor='w', padx=2, pady=(4,0))
-        # 时间显示 (已用 + 预计剩余)
-        self.time_var = tk.StringVar(value='')
-        ttk.Label(pbar_wrap, textvariable=self.time_var,
-                  font=('Microsoft YaHei', 9), foreground='#666666').pack(anchor='w', padx=2)
+        # 断点续跑贴在控制区上方(与“开始”同时看到, 属于本趟怎么跑)
+        opt_row = ttk.Frame(bottom); opt_row.pack(fill='x', pady=(6, 0))
+        self.resume_var = tk.BooleanVar(value=False)
+        self._cbtn(opt_row, '⏭ 断点续跑(已有成片的名字直接跳过)', self.resume_var, side='left')
+        self.open_dir_var = tk.BooleanVar(value=True)
+        self._cbtn(opt_row, '完成后打开目录', self.open_dir_var, side='left', padx=(14, 0))
 
-        # ============ 日志(右侧面板) ============
-        log_card = ttk.Labelframe(right, text='日志', style='Card.TLabelframe')
-        log_card.pack(fill='both', expand=True)
-        log_btns = ttk.Frame(log_card); log_btns.pack(fill='x', padx=8, pady=(8,0))
-        ttk.Button(log_btns, text='复制', command=self.copy_log).pack(side='left')
-        ttk.Button(log_btns, text='导出', command=self.export_log).pack(side='left', padx=(5,0))
-        ttk.Button(log_btns, text='清空', command=self.clear_log).pack(side='left', padx=(5,0))
-        self.log_box = tk.Text(log_card, width=30, font=('Consolas', 9), state='disabled',
-                               bg='#ffffff', relief='solid', bd=1, wrap='word')
-        self.log_box.pack(fill='both', expand=True, padx=8, pady=(6,8))
         self._runner = None
         self._thread = None
         self._log_serial = 0        # 日志清空序号(用于丢弃清空前排队的日志)
 
-        # 加载已保存的设置(剪映路径/输出目录/项目名/勾选项等)
+        # 加载已保存的设置 + 初始化模板下拉框
         self._load_all_settings()
-        # 初始化项目模板下拉框
         self._templates = {}
         self._refresh_templates()
+
+        # 卡片内控件统一白底(否则标签/勾选框会带页面灰色块)
+        for _c in (card1, card2, card3):
+            self._retint_card_widgets(_c)
 
         # 启动链接状态轮询
         self._polling = False
@@ -1125,6 +1334,48 @@ class App:
             self.root.bind('<space>', lambda e: self._hotkey_toggle_pause())
         except Exception:
             pass
+
+    def _scrollable_left(self, main, bg):
+        """左操作区包一层纵向滚动容器。
+
+        控件行数多了之后小窗口会溢出到看不见(默认 960x760 时开始按钮/进度条全部不可见),
+        加滚动条才能保证任何尺寸都能触达。滚轮仅在该区域悬停时生效。
+        返回 (外层Frame, 放内容的innerFrame)。
+        """
+        outer = ttk.Frame(main)
+        canvas = tk.Canvas(outer, bg=bg, highlightthickness=0, bd=0)
+        vsb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side='right', fill='y')
+        canvas.pack(side='left', fill='both', expand=True)
+        inner = ttk.Frame(canvas)
+        win_id = canvas.create_window((0, 0), window=inner, anchor='nw')
+
+        def on_inner(_e=None):
+            canvas.configure(scrollregion=canvas.bbox('all'))
+
+        def on_canvas(e):
+            canvas.itemconfigure(win_id, width=e.width)   # 内容宽度跟随可视区
+
+        inner.bind('<Configure>', on_inner)
+        canvas.bind('<Configure>', on_canvas)
+
+        def wheel(e):
+            if inner.winfo_reqheight() <= canvas.winfo_height():
+                return None            # 内容没溢出就不接管
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units')
+            return 'break'
+
+        def bind_wheel(_e=None):
+            canvas.bind_all('<MouseWheel>', wheel)
+
+        def unbind_wheel(_e=None):
+            canvas.unbind_all('<MouseWheel>')
+
+        canvas.bind('<Enter>', bind_wheel, add='+')
+        canvas.bind('<Leave>', unbind_wheel, add='+')
+        return outer, inner
+
 
     # ---- 设置持久化
     def _current_window_size(self):
@@ -2254,8 +2505,15 @@ def startup_check(root, app):
 
 
 def main():
+    # 必须在创建任何窗口前开 DPI 感知, 否则高分屏上整窗被拉伸发虚
+    _aware = enable_dpi_awareness()
     root = tk.Tk()
     app = App(root)
+    app._dpi_awareness = _aware
+    try:
+        app._log(f'DPI 感知: {_aware} · 缩放 {get_dpi_scale(root):.2f}x')
+    except Exception:
+        pass
     # 关窗前记下窗口尺寸, 下次启动恢复
     try:
         root.protocol('WM_DELETE_WINDOW', lambda: (app._save_window_size(), root.destroy()))
