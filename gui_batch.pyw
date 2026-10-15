@@ -1209,7 +1209,11 @@ class App:
         ttk.Label(secB, text='剧名 (匹配项目文件夹)').pack(anchor='w', padx=self.PAD_X, pady=(6, 2))
         fin_row2 = ttk.Frame(secB); fin_row2.pack(fill='x', padx=self.PAD_X)
         self.final_title_var = tk.StringVar()
-        ttk.Entry(fin_row2, textvariable=self.final_title_var).pack(side='left', fill='x', expand=True, padx=(0, 8))
+        self.final_title_entry = ttk.Entry(fin_row2, textvariable=self.final_title_var)
+        self.final_title_entry.pack(side='left', fill='x', expand=True, padx=(0, 8))
+        # 用户手改剧名 -> 取消自动标记, 后续导入不再覆盖(尊重手填)
+        self.final_title_entry.bind('<KeyRelease>', lambda e: self._on_title_typed())
+        self.final_title_entry.bind('<<Paste>>', lambda e: self._on_title_typed())
         ttk.Label(fin_row2, text='子文件夹').pack(side='left')
         self.final_subdir_var = tk.StringVar(value=FINAL_SUBDIR)
         ttk.Entry(fin_row2, textvariable=self.final_subdir_var, width=10).pack(side='left', padx=(3, 8))
@@ -1517,7 +1521,11 @@ class App:
             pass
 
     def _load_all_settings(self):
-        """启动时把 config.json 的全部设置应用到界面"""
+        """启动时把 config.json 的全部设置应用到界面。
+
+        读回来的剧名一律视为“可被下次导入覆盖” —— 它只是上次的值,
+        不应当作“用户手填”而永远挡住新 CSV 的自动填入。
+        """
         try:
             import json
             if os.path.exists(SETTINGS_FILE):
@@ -1527,6 +1535,8 @@ class App:
                     self._apply_settings(data)
         except Exception:
             pass
+        # 关键: 把启动读回的剧名当作自动值, 这样下次导入 CSV 会正常覆盖
+        self._auto_title = (self.final_title_var.get().strip() or None)
 
     def backup_config(self):
         """备份配置: 把当前界面设置(含剪映路径/输出目录/项目名/勾选项)导出为单个 .json"""
@@ -1787,20 +1797,45 @@ class App:
         return None
 
     def _fill_title_from_path(self, path):
-        """导入CSV/TXT 时自动把剧名填到“剧名”输入框:
-        优先用文件名(去后缀), 否则用其父文件夹名。
-        仅在剧名框为空或还停在上次的自动值时覆盖, 不抢用户手填内容。"""
+        """导入CSV/TXT 时自动把剧名填到“剧名”输入框。
+
+        剧名取自文件名(去序号/后缀), 拿不到则退回父文件夹名 ——
+        文件名就是你选的那部剧, 是最可靠的依据。
+
+        覆盖规则:
+          - 本次导入前手改过剧名 -> 不覆盖(尊重手填)
+          - 其余情况(含上次运行留下的旧剧名) -> 一律用新文件名覆盖
+        注意: _auto_title 必须跟剧名一起持久化, 否则重启后旧剧名会被
+        误判成“手填”而挡住新导入(之前的 bug)。
+        """
         try:
             stem = os.path.splitext(os.path.basename(path))[0]
             cand = clean_title(stem) or os.path.basename(os.path.dirname(path))
             if not cand:
                 return
             cur = self.final_title_var.get().strip()
-            if cur and cur != getattr(self, '_auto_title', ''):
-                return   # 用户手填过, 不动
+            last_auto = getattr(self, '_auto_title', '') or ''
+            # 非空、且不是上一次自动填的 -> 认为用户手改过, 不覆盖
+            if cur and cur != last_auto:
+                self._log(f'剧名保留手填值: {cur}  (如需用文件名, 请手动改)')
+                return
             self.final_title_var.set(cand)
             self._auto_title = cand
             self._log(f'剧名已自动填入: {cand}  (最终位置匹配用)')
+        except Exception as ex:
+            self._log(f'自动填剧名失败: {ex}')
+
+    def mark_title_manual(self):
+        """用户手改剧名: 去掉自动标记, 后续导入不再覆盖它。"""
+        self._auto_title = None
+
+    def _on_title_typed(self):
+        """剧名框被手工修改: 标记为手填。
+        与自动填入值相同的键盘输入不算手改(过滤掉程序自己 set 造成的误判)。"""
+        try:
+            cur = self.final_title_var.get().strip()
+            if cur != (getattr(self, '_auto_title', '') or ''):
+                self._auto_title = None
         except Exception:
             pass
 

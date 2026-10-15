@@ -37,19 +37,27 @@ ck('转小写', gb.norm_title('My Husband Thinks I’m Obsessed with Him-2') == 
 ck('剧名是项目名子串',
    gb.norm_title('合约八年我成了自己的靠山') in gb.norm_title('731-11926-（海外）《合约八年，我成了自己的靠山》'))
 
-print('--- 真实 O 盘匹配 ---')
+print('--- 真实 O 盘匹配(不依赖具体项目名, 目录会变) ---')
 REAL_ROOT = r'O:\AI漫剧剪辑一组'
 if os.path.isdir(REAL_ROOT):
-    cases = [
-        ('合约八年我成了自己的靠山_角色场景表', '731-11926-（海外）《合约八年，我成了自己的靠山》'),
-        ('死而复生双胞胎的终极复仇_角色场景表', '734-11682-（海外）《死而复生：双胞胎的终极复仇》'),
-        ('我的便宜老公是总裁_角色场景表', 'H0242-11947《我的便宜老公是总裁》'),
-        ('觉醒后我能听懂海洋心声_角色场景表', 'H0251-12154《觉醒后我能听懂海洋心声》'),
-        ('一夜沦陷亿万大佬的绝美娇妻_角色场景表', 'H0226-11823 《一夜沦陷：亿万大佬的绝美娇妻》'),
-    ]
-    for title, expect in cases:
-        proj, why = gb.match_project(REAL_ROOT, title)
-        ck(f'匹配 {title[:12]}…', proj == expect, f'得到 {proj!r} 依据 {why}')
+    subs = [d for d in os.listdir(REAL_ROOT) if os.path.isdir(os.path.join(REAL_ROOT, d))]
+    print(f'  根目录下 {len(subs)} 个项目文件夹')
+    hit = 0
+    for d in subs:
+        # 用文件夹自身的名字去反查, 应当能命中自己
+        proj, why = gb.match_project(REAL_ROOT, d)
+        if proj == d:
+            hit += 1
+        else:
+            print(f'    未命中: {d!r} -> {proj!r} ({why})')
+    ck(f'每个项目都能用自己的名字命中自己 ({hit}/{len(subs)})', hit == len(subs) or len(subs) == 0)
+    # 含《》的剧名(最典型的形态) 抽一个验
+    titled = [d for d in subs if '《' in d]
+    if titled:
+        d = titled[0]
+        inner = d.split('《', 1)[1].split('》', 1)[0]
+        proj, why = gb.match_project(REAL_ROOT, inner)
+        ck(f'从书名号里取剧名能命中 ({inner[:10]}…)', proj == d, f'{proj!r} {why}')
 else:
     print('  (O 盘不可见, 跳过)')
 

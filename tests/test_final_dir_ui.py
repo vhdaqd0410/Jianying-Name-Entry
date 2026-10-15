@@ -228,13 +228,20 @@ else:
     os.environ['APPDATA'] = _real_appdata
 ck('还原后回到源码目录', gb.app_dir() == HERE, gb.app_dir())
 
-print('--- 真实 O 盘匹配 + 剪切到临时目录(只读O盘) ---')
+print('--- 真实 O 盘匹配(不依赖具体项目, 目录会变) ---')
 REAL = r'O:\AI漫剧剪辑一组'
 if os.path.isdir(REAL):
-    proj, why = gb.match_project(REAL, '合约八年我成了自己的靠山_角色场景表')
-    ck('真实 O 盘命中项目', proj and '合约八年' in proj, f'{proj} / {why}')
+    subs = [d for d in os.listdir(REAL) if os.path.isdir(os.path.join(REAL, d))]
+    titled = [d for d in subs if '《' in d]
+    if titled:
+        d = titled[0]
+        inner = d.split('《', 1)[1].split('》', 1)[0]
+        proj, why = gb.match_project(REAL, inner)
+        ck(f'真实 O 盘命中项目 ({inner[:12]}…)', proj == d, f'{proj} / {why}')
+    else:
+        print(f'  (O 盘无带书名号的项目, 共 {len(subs)} 个, 跳过)')
 else:
-    print('  (O盘不可见, 跳过)')
+    print('  (O 盘不可见, 跳过)')
 
 root.destroy()
 shutil.rmtree(tmp, ignore_errors=True)
