@@ -1204,8 +1204,8 @@ class App:
         ttk.Button(fin_row, text='浏览', command=self.pick_final_root).pack(side='left', padx=(0, 3))
         ttk.Button(fin_row, text='清除', command=lambda: self.final_root_var.set('')).pack(side='left')
 
-        # 分组 B: 归档规则(默认折叠)
-        secB = self._fold_section(card3, '归档规则', opened=False)
+        # 分组 B: 归档规则(默认展开, 导入CSV后会用到剧名/同名处理)
+        secB = self._fold_section(card3, '归档规则', opened=True)
         ttk.Label(secB, text='剧名 (匹配项目文件夹)').pack(anchor='w', padx=self.PAD_X, pady=(6, 2))
         fin_row2 = ttk.Frame(secB); fin_row2.pack(fill='x', padx=self.PAD_X)
         self.final_title_var = tk.StringVar()
@@ -1839,7 +1839,7 @@ class App:
         except Exception:
             pass
 
-    def load_csv(self):
+    def load_csv(self, auto_preview=True):
         path = filedialog.askopenfilename(title='选择CSV', filetypes=[('CSV','*.csv'),('所有','*.*')])
         if not path: return
         try:
@@ -1872,10 +1872,12 @@ class App:
             self._set_names(names)
             self._log(f'已从CSV导入{len(names)}个英文名(列:{col})')
             self._fill_title_from_path(path)
+            if auto_preview:
+                self._run_match_preview_async()
         except Exception as ex:
             messagebox.showerror('导入失败', str(ex))
 
-    def load_txt(self):
+    def load_txt(self, auto_preview=True):
         path = filedialog.askopenfilename(title='选择TXT', filetypes=[('TXT','*.txt'),('所有','*.*')])
         if not path: return
         try:
@@ -1891,8 +1893,25 @@ class App:
             self._set_names(names)
             self._log(f'已从TXT导入{len(names)}个英文名')
             self._fill_title_from_path(path)
+            if auto_preview:
+                self._run_match_preview_async()
         except Exception as ex:
             messagebox.showerror('导入失败', str(ex))
+
+    def _run_match_preview_async(self):
+        """导入后自动弹匹配预览。
+
+        用 after 延后一拍再弹: 导入时刚 set 完名字框/剧名, 立即开模态窗会在
+        事件队列里抢先, 导致界面状态还没刷新完弹窗就出来了。
+        未填写最终位置根目录时静默略过(不是每个人都有归档需求)。
+        """
+        try:
+            if not self.final_root_var.get().strip():
+                self._log('（未设置最终位置根目录，跳过自动匹配预览）')
+                return
+            self.root.after(120, lambda: self.preview_final_match(auto=True))
+        except Exception:
+            pass
 
     def paste_names(self):
         try:
@@ -1990,32 +2009,174 @@ class App:
         if d:
             self.final_root_var.set(d)
 
-    def preview_final_match(self):
-        """匹配预览: 只读探测当前设定会定位到哪个项目文件夹, 不改任何文件"""
-        root = self.final_root_var.get().strip()
-        title = self.final_title_var.get().strip()
+    def preview_final_match(self, auto=False):
+        """匹配预览（自绘弹窗）。
+
+        auto=True 时供导入 CSV/TXT 后自动调用。
+        行为:
+          - 匹配成功: 弹窗显示结果, 倒计时 3 秒自动关闭
+          - 匹配失败: 弹窗里给剧名输入框 + 「检测」按钮, 改完重试;
+            检测成功后转为成功态并倒计时关闭
+        """
+        root_dir = self.final_root_var.get().strip()
+        # 没设最终位置就不弹(没有归档需求)
+        if not root_dir:
+            if not auto:
+                messagebox.showinfo('匹配预览', '请先填写最终位置根目录')
+            return
+        if not os.path.isdir(root_dir):
+            if not auto:
+                messagebox.showerror('匹配预览', f'根目录不存在:\n{root_dir}')
+            return
+        self._open_match_dialog(root_dir, auto=auto)
+
+    def _open_match_dialog(self, root_dir, auto=False):
+        """匹配预览弹窗（成功倒计时关闭 / 失败可改剧名重试）"""
         sub = self.final_subdir_var.get().strip() or FINAL_SUBDIR
-        if not root:
-            messagebox.showinfo('匹配预览', '请先填写最终位置根目录')
-            return
-        if not os.path.isdir(root):
-            messagebox.showerror('匹配预览', f'根目录不存在:\n{root}')
-            return
         names = self._get_names()
-        proj, why = match_project(root, title, names)
-        if proj:
-            d = os.path.join(root, proj, sub)
+
+        top = tk.Toplevel(self.root)
+        top.title('匹配预览')
+        top.transient(self.root)
+        top.resizable(False, False)
+        top.configure(bg=self.C_CARD)
+
+        state = {'timer': None, 'left': 0, 'done': False, 'proj': '', 'why': ''}
+
+        # ---- 顶部结果区
+        box = ttk.Frame(top, style='Card.TFrame')
+        box.pack(fill='both', expand=True, padx=16, pady=(14, 0))
+        title_lb = tk.Label(box, text='', bg=self.C_CARD, fg=self.C_TEXT,
+                            font=('Microsoft YaHei', self._F['big'], 'bold'),
+                            anchor='w', justify='left')
+        title_lb.pack(anchor='w')
+        detail_lb = tk.Label(box, text='', bg=self.C_CARD, fg='#5b6270',
+                             font=('Microsoft YaHei', self._F['base']),
+                             anchor='w', justify='left', wraplength=460)
+        detail_lb.pack(anchor='w', pady=(6, 0))
+
+        # ---- 失败时的剧名输入区（成功时 pack_forget 掉）
+        retry = ttk.Frame(box, style='Card.TFrame')
+        ttk.Label(retry, text='剧名', style='Card.TLabel').pack(side='left')
+        edit_var = tk.StringVar(value=self.final_title_var.get().strip())
+        edit = ttk.Entry(retry, textvariable=edit_var, width=34)
+        edit.pack(side='left', fill='x', expand=True, padx=(6, 6))
+        hint_lb = tk.Label(box, text='可直接改成项目文件夹里的剧名（如剧名本身），再点「检测」',
+                           bg=self.C_CARD, fg=self.C_HINT,
+                           font=('Microsoft YaHei', self._F['small']),
+                           anchor='w', justify='left')
+
+        # ---- 底部按钮区
+        row = ttk.Frame(top, style='Card.TFrame')
+        row.pack(fill='x', padx=16, pady=(12, 14))
+        btn_check = ttk.Button(row, text='检测')
+        btn_ok = ttk.Button(row, text='确定')
+        btn_cancel = ttk.Button(row, text='关闭')
+
+        def cancel_timer():
+            if state['timer']:
+                try:
+                    top.after_cancel(state['timer'])
+                except Exception:
+                    pass
+                state['timer'] = None
+
+        def close(_e=None):
+            cancel_timer()
+            try:
+                top.destroy()
+            except Exception:
+                pass
+
+        def show_success(proj, why):
+            state['done'] = True
+            state['proj'] = proj
+            state['why'] = why
+            d = os.path.join(root_dir, proj, sub)
             exist = len(os.listdir(d)) if os.path.isdir(d) else 0
             act = '剪切' if self.final_move_var.get() else '复制'
-            messagebox.showinfo('匹配预览',
-                f'已定位项目文件夹:\n{proj}\n\n匹配依据: {why}\n\n成片将{act}到:\n{d}\n'
-                f'\n(该目录现有 {exist} 个文件)')
+            title_lb.config(text='✓ 匹配成功', fg='#1e8e4e')
+            detail_lb.config(text=f'项目文件夹：{proj}\n匹配依据：{why}\n'
+                                  f'成片将{act}到：{d}\n（该目录现有 {exist} 个文件）')
+            # 失败态 UI 消失, 按钮收起
+            try:
+                retry.pack_forget(); hint_lb.pack_forget()
+                btn_check.pack_forget(); btn_cancel.pack_forget()
+            except Exception:
+                pass
+            btn_ok.pack(side='right')
+            # 3 秒倒计时后自动关
+            state['left'] = 3
+            def tick():
+                if not state.get('done'):
+                    return
+                state['left'] -= 1
+                if state['left'] > 0:
+                    btn_ok.config(text=f'确定 ({state["left"]}s)')
+                    state['timer'] = top.after(1000, tick)
+                else:
+                    close()
+            btn_ok.config(text=f'确定 ({state["left"]}s)')
+            state['timer'] = top.after(1000, tick)
             self._log(f'✓ 匹配预览: {d}   [{why}]')
-        else:
-            messagebox.showwarning('匹配预览',
-                f'未能定位项目文件夹。\n\n原因: {why}\n剧名: {title or "(空)"}\n\n'
-                f'可手动填写“剧名”, 或在 CSV 文件名里带上剧名。')
+
+        def show_failure(why):
+            title_lb.config(text='✗ 未匹配到项目文件夹', fg='#c0392b')
+            detail_lb.config(text=f'原因：{why}\n根目录：{root_dir}')
+            retry.pack(fill='x', pady=(12, 2))
+            hint_lb.pack(anchor='w', pady=(0, 0))
+            btn_ok.pack_forget()
+            btn_check.pack(side='right', padx=(0, 6))
+            btn_cancel.pack(side='right')
+            cancel_timer()
+            try:
+                edit.focus_set()
+                edit.select_range(0, 'end')
+            except Exception:
+                pass
             self._log(f'✗ 匹配预览失败: {why}')
+
+        def do_check():
+            t = edit_var.get().strip()
+            if not t:
+                title_lb.config(text='✗ 剧名不能为空', fg='#c0392b')
+                return
+            proj, why = match_project(root_dir, t, names)
+            if proj:
+                # 回写剧名, 让后续投送用这个值
+                self.final_title_var.set(t)
+                self._auto_title = t
+                show_success(proj, why)
+            else:
+                show_failure(why)
+                detail_lb.config(text=f'原因：{why}\n剧名：{t}\n根目录：{root_dir}')
+
+        btn_check.config(command=do_check)
+        btn_ok.config(command=close)
+        btn_cancel.config(command=close)
+        edit.bind('<Return>', lambda e: do_check())
+        top.protocol('WM_DELETE_WINDOW', close)
+
+        # 首次匹配（优先用输入框里的剧名, 空则用界面上的）
+        first = (edit_var.get().strip() or self.final_title_var.get().strip())
+        proj, why = match_project(root_dir, first, names)
+        if proj:
+            show_success(proj, why)
+        else:
+            show_failure(why)
+
+        # 居中于主窗口
+        try:
+            top.update_idletasks()
+            x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - top.winfo_width()) // 2)
+            y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - top.winfo_height()) // 3)
+            top.geometry(f'+{x}+{y}')
+            if not state['done']:
+                top.grab_set()      # 失败态需要交互, 模态
+            else:
+                top.lift()
+        except Exception:
+            pass
 
     def pick_ffmpeg(self):
         """选择 ffmpeg 可执行文件 (用于导出后转透明通道)"""

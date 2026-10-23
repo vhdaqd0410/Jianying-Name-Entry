@@ -155,12 +155,12 @@ if card3:
     fbs[0].invoke(); root.update(); time.sleep(0.08)
     h2 = card3.winfo_reqheight()
     ck('再点恢复原高', h2 == h0, f'{h2} vs {h0}')
-    # 分组2 默认折叠 -> 点它应变高
+    # 分组2(归档规则) v1.9.0 起默认展开 -> 点它应收起
     fbs[1].invoke(); root.update(); time.sleep(0.08)
     h3 = card3.winfo_reqheight()
-    ck('展开“归档规则”后变高', h3 > h0, f'{h0} -> {h3}')
+    ck('“归档规则”默认展开(点后变矮)', h3 < h0, f'{h0} -> {h3}')
     fbs[1].invoke(); root.update(); time.sleep(0.08)
-    ck('再点收起', card3.winfo_reqheight() == h0)
+    ck('再点恢复', card3.winfo_reqheight() == h0, card3.winfo_reqheight())
 
 print('--- 窄栏宽度分配 ---')
 # 按内容识别: 含日志框的帧 = 日志区
