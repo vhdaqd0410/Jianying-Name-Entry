@@ -80,12 +80,18 @@ python -m PyInstaller gui_batch.spec --noconfirm
 > 启动时报 `Failed to execute script 'pyiboot01_bootstrap' ... Bootloader did not set sys._pyinstaller_pyz!`。
 > 遇到这种情况，把 `build/` 目录删掉（或换 `--workpath`）重新打包即可。
 
+> **打包依赖注意（曾导致「检测一直未连接」）**：
+> - `comtypes` 的子模块（尤其 `comtypes.stream`）必须显式写进 `hiddenimports`，PyInstaller 不自动全收；
+> - uiautomation 自带的 `UIAutomationClient_VC140_X64/X86.dll` 必须随包放进 `uiautomation/bin/`（用 `binaries`）；
+> - **不要**做 comtypes 全量枚举，会连带引入 `win32com`，其运行钩子会因缺 `pythoncom` 启动即崩。
+> - 改了 spec 后跑 `python tests/test_packaging.py` 做静态校验。
+
 ## 验证脚本
 
 `tests/` 下两个脚本可离线验证核心逻辑（不连剪映，只做文件与界面级检查）：
 
 ```bash
-python tests/run_all.py              # 一次跑完全部七套
+python tests/run_all.py              # 一次跑完全部八套
 python tests/test_final_match.py     # 剧名归一化 / 项目文件夹匹配
 python tests/test_deliver_batch.py   # 投送语义: 整批完成后统一剪切 / 只搬本次产物 / 四种同名策略
 python tests/test_final_dir_ui.py    # 界面控件 / 配置持久化 / 同名询问弹窗
@@ -93,6 +99,7 @@ python tests/test_v170_optimize.py   # 断点续跑 / 空格热键 / 重跑不�
 python tests/test_ui_v180.py         # 界面重塑: 关键控件可见性 / 滚动 / 折叠分组 / 宽度分配
 python tests/test_title_autofill.py  # 剧名自动填入规则与边界
 python tests/test_match_dialog.py    # 归档规则默认展开 / 导入后自动匹配预览 / 成功倒计时 / 失败重试
+python tests/test_packaging.py       # 打包依赖完整性: comtypes.stream / UIA DLL / 排除 win32com
 ```
 
 `test_final_match.py` 会读取真实的 `O:\AI漫剧剪辑一组` 做匹配校验；该目录不存在时自动跳过。
@@ -133,6 +140,7 @@ Jianying-Name-Entry/
 
 ## 版本历史
 
+- **v2.0.0**：修复打包后**检测一直未连接**（以及连带失效的批量替换导出）——根因是 spec 漏收 `comtypes.stream` 与 uiautomation 自带的两个 UIA DLL，导致每次 UIA 调用都抛 ModuleNotFoundError；「启动剪映」只用 subprocess 所以看起来正常，掩盖了问题。另修启动时日志错误地写“未检测到剪映”却又显示已连接的矛盾
 - **v1.9.0**：归档规则默认展开；导入 CSV/TXT 后自动弹匹配预览（成功 3 秒倒计时自动关，失败可现场改剧名点检测重试）
 - **v1.8.1**：修剧名自动填入——之前重启后上次的剧名会被误判成“手填”，导致新导入 CSV 的剧名永远填不进去
 - **v1.8.0**：界面重塑（DPI 感知 / 底部控制区固定 / 左栏滚动 / 卡片折叠分组 / 长标题拆行 / 视觉细化）

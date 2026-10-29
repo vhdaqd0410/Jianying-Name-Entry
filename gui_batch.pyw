@@ -2588,10 +2588,20 @@ class App:
         def _finish():
             """后台线程结束(无论成败)后在主线程收尾并安排下一轮"""
             self._link_checking = False
-            if holder.get('ok'):
+            ok = bool(holder.get('ok'))
+            if ok:
                 self._set_link_status('connected', '已连接')
             else:
                 self._set_link_status('disconnected', '未连接')
+            # 状态发生变化时写一条日志, 便于回溯(不在每轮轮询里刷屏)
+            prev = getattr(self, '_link_last_ok', None)
+            if ok != prev:
+                self._link_last_ok = ok
+                if ok:
+                    self._log('✔ 已连接剪映，可以开始批量')
+                else:
+                    self._log('⚠ 未连接剪映：请确认剪映已打开并停留在编辑页'
+                              '（用上方“启动剪映”按钮可直接启动）')
             if getattr(self, '_polling', True):
                 self.root.after(self.LINK_POLL_MS, self._poll_link_status)
 
@@ -2685,18 +2695,16 @@ class App:
 
 
 def startup_check(root, app):
-    """启动时检测剪映是否可连(带超时, 不阻塞界面)。
+    """启动时预热剪映连接(不阻塞界面, 也不下“未连接”结论)。
 
-    剪映未运行时 UIA 查找可能挂起, 故用后台线程+超时检测,
-    无论结果如何都放行进入主界面, 由用户用顶部'启动剪映'按钮控制。"""
+    这里曾用 4 秒超时在主线程试连一次, 超时就写“未检测到剪映”。
+    问题: 首次加载 COM + UIA DLL 本身可能超过 4 秒(尤其是刚开机/首次运行),
+    于是日志先写了一条“未检测到”, 而随后轮询很快又显示“已连接”, 前后矛盾。
+    现在只做预热, 真正的状态一律以连续轮询为准。
+    """
     root.update()
     root.deiconify()
-    ctrl = connect_jianying_timeout(activate=True, timeout=4)
-    if ctrl is not None:
-        app._log('✔ 剪映已连接, 可以开始使用')
-        return True
-    # 剪映未连接(超时或失败): 不阻塞, 提示用户自行启动
-    app._log('⚠ 未检测到剪映(或连接超时)。请用顶部\'启动剪映\'按钮启动, 或手动打开剪映。')
+    connect_jianying_timeout(activate=True, timeout=4)   # 预热, 结果不重要
     return True
 
 
