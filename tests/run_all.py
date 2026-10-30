@@ -5,7 +5,7 @@ sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 HERE = os.path.dirname(os.path.abspath(__file__))
 tests = ['test_final_match.py', 'test_deliver_batch.py', 'test_final_dir_ui.py',
          'test_v170_optimize.py', 'test_ui_v180.py', 'test_title_autofill.py',
-         'test_match_dialog.py', 'test_packaging.py']
+         'test_match_dialog.py', 'test_packaging.py', 'test_export_detect.py']
 allok, total = True, 0
 for t in tests:
     p = os.path.join(HERE, t)

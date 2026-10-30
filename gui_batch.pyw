@@ -4,7 +4,7 @@
 特点: 文件一出现即移动, 不依赖关掉成功弹窗; 失败单独重跑; 界面+日志
 启动: 双击 gui_batch.pyw 或 `uv run python gui_batch.pyw`
 """
-import sys, os, time, ctypes, glob, shutil, threading, argparse
+import sys, os, time, ctypes, shutil, threading, argparse
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -340,7 +340,7 @@ class BatchRunner:
     """批量导出运行器(在后台线程跑, 界面用回调更新)"""
     def __init__(self, ctrl, outdir, resolution=None, framerate=None, log_cb=None, progress_cb=None, dry_run=False,
                  transparent=False, ffmpeg_path='', final_root='', final_title='', final_subdir=FINAL_SUBDIR,
-                 final_move=True, conflict_policy='ask', conflict_cb=None, resume=False):
+                 final_move=True, conflict_policy='ask', conflict_cb=None, resume=False, export_dir=''):
         self.ctrl = ctrl
         self.outdir = outdir
         self.resolution = resolution
@@ -355,6 +355,7 @@ class BatchRunner:
         self.conflict_policy = conflict_policy or 'ask'   # 同名冲突: ask/overwrite/rename/skip
         self.conflict_cb = conflict_cb      # 询问回调(conflicts)->策略; 主线程弹窗
         self.resume = bool(resume)      # 断点续跑: 已生成过的名字直接跳过, 不重复导出
+        self.export_dir = (export_dir or '').strip()   # 剪映导出目录(可选; 空=自动按常见位置扫描)
         self._produced = []             # 本次运行产生的文件(仅这些会被投送)
         self._archive_sub = ''          # 项目归档子目录名(如 项目A_20260902), run 后更新
         self._final_project = None      # 解析出的项目文件夹名
@@ -456,28 +457,132 @@ class BatchRunner:
         self._log(f'  !!替换后读回未确认到 {name} (读回{tb[0] if tb else "无"!r})')
         return False
 
-    def _scan_exports(self):
-        """扫描所有可能产生导出文件的目录: 桌面(默认导出位置) + 输出目录。
-        这样剪映无论导出到桌面还是直接把导出路径设为输出目录, 都能找到新文件。
-        只匹配 海外人名条*.mp4 (剪映导出文件名前缀), 输出目录里已重命名的 名字.mp4 不干扰。"""
-        dirs = [os.path.expanduser(r'~\Desktop')]
-        for d in (self.outdir, getattr(self, '_outdir_actual', None)):
-            if d and d not in dirs and os.path.isdir(d):
-                dirs.append(d)
-        found = set()
-        for d in dirs:
-            found.update(glob.glob(os.path.join(d, '海外人名条*.mp4')))
-        return found
+    # 剪映可能用到的导出目录候选(不同机器/不同版本默认位置不同)
+    EXPORT_DIR_CANDIDATES = [
+        '~\\Desktop',                                  # 桌面(最常见)
+        '~\\Videos',                                   # 视频
+        '~\\Videos\\JianyingPro',
+        '~\\Downloads',                                # 下载
+        '~\\Documents',
+    ]
+    # 剪映导出文件的默认前缀(本机是「海外人名条」, 但别的机器/草稿可能不同);
+    # 因此它只作为“优先候选”, 不是唯一依据
+    EXPORT_NAME_HINTS = ['海外人名条']
 
-    def wait_new_export(self, before_set, timeout=120):
+    def export_dirs(self):
+        """返回本次要扫描的导出目录列表(去重、只保留存在的)。
+        包含: 用户指定的导出目录 > 输出目录 > 常见默认位置。"""
+        dirs = []
+        def add(p):
+            if not p:
+                return
+            p = os.path.expandvars(os.path.expanduser(str(p)))
+            if p and os.path.isdir(p) and p not in dirs:
+                dirs.append(p)
+        add(getattr(self, 'export_dir', ''))
+        add(self.outdir)
+        add(getattr(self, '_outdir_actual', None))
+        for c in self.EXPORT_DIR_CANDIDATES:
+            add(c)
+        return dirs
+
+    def _snapshot_exports(self):
+        """对候选目录做视频文件快照: {path: (size, mtime)}。
+
+        不再依赖文件名前缀 —— 别的电脑上草稿名不同、导出名就不同,
+        写死前缀会直接导致“卡在等文件”。改用快照差异: 新出现或大小/时间变化的都算新导出。
+        """
+        snap = {}
+        for d in self.export_dirs():
+            try:
+                with os.scandir(d) as it:
+                    for e in it:
+                        try:
+                            if not e.is_file():
+                                continue
+                            ext = os.path.splitext(e.name)[1].lower()
+                            if ext not in ('.mp4', '.mov'):
+                                continue
+                            st = e.stat()
+                            snap[e.path] = (st.st_size, st.st_mtime)
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+        return snap
+
+    def _scan_exports(self):
+        """兼容旧接口: 返回当前候选目录里所有视频文件路径集合。"""
+        return set(self._snapshot_exports().keys())
+
+    def _diff_exports(self, before_snap):
+        """比对快照, 返回新增或发生变化的视频文件(新的优先)。
+
+        加入时间窗: 只认最近 10 分钟内写过的文件, 避开目录里本来就有的旧片。
+        优先取名字带剪映默认前缀的, 其次取最新的。
+        """
+        now = time.time()
+        cands = []
+        cur = self._snapshot_exports()
+        for path, (size, mtime) in cur.items():
+            old = before_snap.get(path)
+            changed = (old is None) or (old != (size, mtime))
+            if not changed:
+                continue
+            if size <= 0:
+                continue
+            # 时间窗: 只认刚写过的(避免把很久以前的旧文件当成新导出)
+            if now - mtime > 600:
+                continue
+            pref = 1 if any(h in os.path.basename(path) for h in self.EXPORT_NAME_HINTS) else 0
+            cands.append((pref, mtime, path))
+        if not cands:
+            return None
+        cands.sort(reverse=True)     # 前缀命中优先, 其次最新的
+        return cands[0][2]
+
+    def wait_new_export(self, before_state, timeout=120):
+        """等新导出文件出现。
+
+        before_state 可为旧接口的 set(向后兼容) 或快照 dict。
+        超时时会把扫描过的目录写进日志, 便于现场定位到底导出到哪了。
+        """
+        before_snap = before_state if isinstance(before_state, dict) else None
+        if before_snap is None:
+            # 旧接口传入的是路径集合, 转成快照便于比较
+            before_snap = {}
+            for p in (before_state or ()):
+                try:
+                    st = os.stat(p)
+                    before_snap[p] = (st.st_size, st.st_mtime)
+                except Exception:
+                    before_snap[p] = (0, 0)
         t0 = time.time()
         while time.time() - t0 < timeout:
-            if self._stop.is_set(): return None
-            cur = self._scan_exports()
-            new = cur - before_set
-            if new: return list(new)[0]
+            if self._stop.is_set():
+                return None
+            hit = self._diff_exports(before_snap)
+            if hit:
+                return hit
             time.sleep(0.5)
+        # 超时: 把找过的目录与每个目录里的视频数量打出来(取证用)
+        try:
+            self._log(f'  !!{timeout}s 内未找到新导出文件, 已扫描目录:')
+            for d in self.export_dirs():
+                n = 0
+                try:
+                    with os.scandir(d) as it:
+                        for e in it:
+                            if e.is_file() and os.path.splitext(e.name)[1].lower() in ('.mp4', '.mov'):
+                                n += 1
+                except Exception:
+                    n = -1
+                self._log(f'     {d}  (视频文件 {n} 个)')
+            self._log('    请确认剪映“导出”对话框里的导出位置是否在上面这些目录里。')
+        except Exception:
+            pass
         return None
+
 
     def _wait_file_stable(self, path, timeout=15):
         """等文件写入完成(大小稳定): 连续两次读取大小一致即视为写完。
@@ -561,7 +666,14 @@ class BatchRunner:
             else:
                 shutil.move(src, target)
             self._log(f'  -> {target}')
-            before_set.discard(src)
+            # before_set 现在是快照 dict(路径 -> (size, mtime)); 搬走后在快照里标记为已处理
+            try:
+                if isinstance(before_set, dict):
+                    before_set[src] = (0, 0)
+                else:
+                    before_set.discard(src)
+            except Exception:
+                pass
             produced = [target]
             # 若勾选转透明, 导出后把该 MP4 转成带透明通道的 MOV
             if self.transparent:
@@ -575,7 +687,11 @@ class BatchRunner:
             return True
         except Exception as ex:
             self._log(f'  移动失败:{ex}')
-            before_set.add(src)
+            try:
+                if not isinstance(before_set, dict):
+                    before_set.add(src)
+            except Exception:
+                pass
             return False
 
     # ---- 最终位置: 自动定位项目文件夹, 把成片剪切(或复制)到 项目\人名条\
@@ -838,7 +954,7 @@ class BatchRunner:
         else:
             todo = list(names)
 
-        before_set = self._scan_exports()
+        before_set = self._snapshot_exports()
         results = {}
         run_start = time.time()
         # 跳过的不计入进度分母, 让剩余条数才是真实的待处理量
@@ -1309,6 +1425,18 @@ class App:
         else:
             self.project_var = tk.StringVar(value='')   # 占位, 保证不建子目录
 
+        # 剪映导出目录(解决别的电脑上“卡在等文件”)
+        ttk.Label(secC, text='剪映导出目录 (选填)').pack(
+            anchor='w', padx=self.PAD_X, pady=(6, 2))
+        self._hint(secC, '留空=自动扫桌面/视频/下载/输出目录；找不到文件时在此填剪映实际导出位置',
+                   padx=self.PAD_X, pady=(0, 3))
+        exp_row = ttk.Frame(secC); exp_row.pack(fill='x', padx=self.PAD_X, pady=(0, 8))
+        self.export_dir_var = tk.StringVar()
+        ttk.Entry(exp_row, textvariable=self.export_dir_var).pack(
+            side='left', fill='x', expand=True, padx=(0, 5))
+        ttk.Button(exp_row, text='浏览', command=self.pick_export_dir).pack(side='left', padx=(0, 3))
+        ttk.Button(exp_row, text='清除', command=lambda: self.export_dir_var.set('')).pack(side='left')
+
         set_row = ttk.Frame(secC); set_row.pack(fill='x', padx=self.PAD_X, pady=(2, 4))
         ttk.Label(set_row, text='分辨率').pack(side='left')
         self.res_var = tk.StringVar(value='不修改')
@@ -1530,6 +1658,7 @@ class App:
             'final_move': bool(self.final_move_var.get()),
             'final_conflict': self._conflict_policy(),
             'resume': bool(self.resume_var.get()),
+            'export_dir': self.export_dir_var.get().strip(),
             'window_size': self._current_window_size(),
             'project': self.project_var.get().strip(),
             'open_dir': bool(self.open_dir_var.get()),
@@ -1553,6 +1682,7 @@ class App:
             'final_move': lambda v: self.final_move_var.set(bool(v)),
             'final_conflict': lambda v: self.conflict_var.set(FROM_CONFLICT_VALUE.get(str(v), DEFAULT_CONFLICT_LABEL)),
             'resume': lambda v: self.resume_var.set(bool(v)),
+            'export_dir': lambda v: self.export_dir_var.set(str(v)),
             'window_size': lambda v: self._apply_window_size(v),
             'project': lambda v: self.project_var.set(str(v)),
             'open_dir': lambda v: self.open_dir_var.set(bool(v)),
@@ -1832,6 +1962,12 @@ class App:
             "12. 完成后打开目录\n"
             "   勾选后, 批量完整跑完自动弹出文件夹。\n"
             "   投送成功则弹最终位置(项目\\人名条\\)；未投送则弹输出目录。\n\n"
+            "13. 卡在“等文件”怎么办\n"
+            "   导出后程序要找到剪映刚生成的文件才能继续。它默认扫:\n"
+            "   剪映导出目录(你填的) > 输出目录 > 桌面/视频/下载/文档。\n"
+            "   完全不依赖文件名前缀(草稿名不同也能认出), 靠文件新增/大小变化判断。\n"
+            "   如果一直等文件: 看日志里列出的“已扫描目录”, 确认剪映导出对话框\n"
+            "   里的位置是否在内; 不在就到 高级选项 > 剪映导出目录 里指过去。\n\n"
             "小提示\n"
             "   - 请确保剪映专业版已打开、字幕条已就绪\n"
             "   - 支持先小批量试跑确认效果再全量"
@@ -2007,6 +2143,12 @@ class App:
     def pick_dir(self):
         d = filedialog.askdirectory()
         if d: self.outdir_var.set(d)
+
+    def pick_export_dir(self):
+        """选择剪映实际导出目录(用于自动找新导出的文件)"""
+        d = filedialog.askdirectory(title='选择剪映导出目录')
+        if d:
+            self.export_dir_var.set(d)
 
     def _conflict_policy(self):
         """界面上的“同名处理”选择 -> 策略值"""
@@ -2302,7 +2444,8 @@ class App:
                                  final_subdir=self.final_subdir_var.get(),
                                  final_move=self.final_move_var.get(),
                                  conflict_policy=self._conflict_policy(),
-                                 resume=self.resume_var.get())
+                                 resume=self.resume_var.get(),
+                                 export_dir=self.export_dir_var.get())
             results = runner.run(names, project)
         except Exception as ex:
             self._log(f'预览异常: {ex}')
@@ -2356,7 +2499,8 @@ class App:
                                        final_move=self.final_move_var.get(),
                                        conflict_policy=self._conflict_policy(),
                                        conflict_cb=self._ask_conflict,
-                                       resume=self.resume_var.get())
+                                       resume=self.resume_var.get(),
+                                       export_dir=self.export_dir_var.get())
             results = self._runner.run(names, project)
         except Exception as ex:
             self._log(f'致命错误: {ex}')
