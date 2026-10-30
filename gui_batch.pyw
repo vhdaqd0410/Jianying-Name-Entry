@@ -73,6 +73,29 @@ def resource_path(rel):
     return os.path.join(base, rel)
 
 
+def is_lite():
+    """是否为「精简版」构建。
+
+    精简版 = 只把成片输出到输出目录, 不自动归档到 O 盘项目文件夹。
+
+    判定只用打包内标记(_MEIPASS/lite.txt), **不看源码目录**:
+    之前把 lite.txt 也放在项目根目录当模板, 结果源码运行/跑测试时
+    全被判成精简版, 界面和功能都跟着变, 污染主版。
+    好处: 主版与精简版共用同一份源码, 只差一个构建开关,
+          修 bug 不用维护两套代码(避免两边逐渐不一致)。
+    """
+    meipass = getattr(sys, '_MEIPASS', '')
+    if meipass and os.path.isfile(os.path.join(meipass, 'lite.txt')):
+        return True
+    # 源码调试用: 只在显式环境变量下开启, 不靠文件存在与否误判
+    if os.environ.get('JY_NAME_LITE') == '1':
+        return True
+    return False
+
+
+LITE = is_lite()     # 模块级缓存, 全程序只判一次
+
+
 def app_dir():
     """可写数据的存放目录(配置/模板/草稿历史)。
 
@@ -80,16 +103,26 @@ def app_dir():
     设置存不住。因此:
       - 冻结(exe)运行: %APPDATA%\\JianyingNameEntry\\  (不往 exe 旁边/桌面据文件)
       - 源码运行: 项目目录 (保持原有习惯)
+    精简版用独立子目录, 避免与完整版互相覆盖设置。
     """
+    sub = 'JianyingNameEntryLite' if LITE else 'JianyingNameEntry'
     if getattr(sys, 'frozen', False):
         base = os.environ.get('APPDATA') or os.path.expanduser('~')
-        d = os.path.join(base, 'JianyingNameEntry')
+        d = os.path.join(base, sub)
         try:
             os.makedirs(d, exist_ok=True)
             return d
         except Exception:
             return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
+    # 源码运行: 精简版放到子目录, 不污染主版 config.json
+    d = os.path.dirname(os.path.abspath(__file__))
+    if LITE:
+        d = os.path.join(d, '_lite_data')
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+    return d
 
 
 # ------------------------------------------------------------------ 时间配置 (可调)
@@ -881,7 +914,7 @@ class BatchRunner:
 class App:
     def __init__(self, root):
         self.root = root
-        root.title('海外人名条批量生成')
+        root.title('海外人名条批量生成' if not LITE else '海外人名条批量生成 · 精简版')
         # 窗口图标(仅界面版; exe自带图标)
         try:
             root.iconbitmap(resource_path('icon.ico'))
@@ -1098,6 +1131,58 @@ class App:
         apply()
         return body
 
+    def _build_archive_sections(self, card3):
+        """构建完整版的归档分组(保存位置 + 归档规则)。
+        精简版不调用本方法。"""
+        # 分组 A: 保存位置(常用, 默认展开)
+        secA = self._fold_section(card3, '保存位置', opened=True)
+        ttk.Label(secA, text='输出目录 (成片先存这里)').pack(
+            anchor='w', padx=self.PAD_X, pady=(6, 2))
+        row = ttk.Frame(secA); row.pack(fill='x', padx=self.PAD_X)
+        self.outdir_var = tk.StringVar(value=DEFAULT_OUTDIR)
+        ttk.Entry(row, textvariable=self.outdir_var).pack(
+            side='left', fill='x', expand=True, padx=(0, 5))
+        ttk.Button(row, text='浏览', command=self.pick_dir).pack(side='left')
+
+        ttk.Label(secA, text='最终位置根目录').pack(anchor='w', padx=self.PAD_X, pady=(8, 2))
+        self._hint(secA, '填了则按剧名自动匹配项目文件夹, 成片剪切到 项目\\人名条\\',
+                   padx=self.PAD_X, pady=(0, 3))
+        fin_row = ttk.Frame(secA); fin_row.pack(fill='x', padx=self.PAD_X, pady=(0, 8))
+        self.final_root_var = tk.StringVar()
+        ttk.Entry(fin_row, textvariable=self.final_root_var).pack(
+            side='left', fill='x', expand=True, padx=(0, 5))
+        ttk.Button(fin_row, text='浏览', command=self.pick_final_root).pack(side='left', padx=(0, 3))
+        ttk.Button(fin_row, text='清除', command=lambda: self.final_root_var.set('')).pack(side='left')
+
+        # 分组 B: 归档规则(默认展开)
+        secB = self._fold_section(card3, '归档规则', opened=True)
+        ttk.Label(secB, text='剧名 (匹配项目文件夹)').pack(
+            anchor='w', padx=self.PAD_X, pady=(6, 2))
+        fin_row2 = ttk.Frame(secB); fin_row2.pack(fill='x', padx=self.PAD_X)
+        self.final_title_var = tk.StringVar()
+        self.final_title_entry = ttk.Entry(fin_row2, textvariable=self.final_title_var)
+        self.final_title_entry.pack(side='left', fill='x', expand=True, padx=(0, 8))
+        # 用户手改剧名 -> 取消自动标记, 后续导入不再覆盖(尊重手填)
+        self.final_title_entry.bind('<KeyRelease>', lambda e: self._on_title_typed())
+        self.final_title_entry.bind('<<Paste>>', lambda e: self._on_title_typed())
+        ttk.Label(fin_row2, text='子文件夹').pack(side='left')
+        self.final_subdir_var = tk.StringVar(value=FINAL_SUBDIR)
+        ttk.Entry(fin_row2, textvariable=self.final_subdir_var, width=10).pack(side='left', padx=(3, 8))
+        ttk.Button(fin_row2, text='匹配预览', command=self.preview_final_match).pack(side='left')
+        self._hint(secB, '导入CSV时自动用文件名填剧名; “匹配预览”先看会送到哪个项目',
+                   padx=self.PAD_X, pady=(2, 4))
+        fin_row3 = ttk.Frame(secB); fin_row3.pack(fill='x', padx=self.PAD_X, pady=(0, 4))
+        ttk.Label(fin_row3, text='同名处理').pack(side='left')
+        self.conflict_var = tk.StringVar(value=DEFAULT_CONFLICT_LABEL)
+        ttk.Combobox(fin_row3, textvariable=self.conflict_var, values=list(CONFLICT_LABELS),
+                     state='readonly', width=8).pack(side='left', padx=(3, 10))
+        ttk.Label(fin_row3, text='最终目录已有同名文件时', foreground=self.C_HINT).pack(side='left')
+        self.final_move_var = tk.BooleanVar(value=True)
+        self._cbtn(secB, '剪切(不勾=只复制到最终位置)', self.final_move_var,
+                   padx=self.PAD_X, pady=(0, 4))
+        self._hint(secB, '投送时机: 全部导出完成后统一剪切; 输出目录里的其它文件不会被搬',
+                   padx=self.PAD_X, pady=(0, 8))
+
     # ------------------------------------------------------------ 界面搭建
     def _build_ui(self, root, bg):
         """搭建界面。
@@ -1184,61 +1269,45 @@ class App:
         self.name_box.tag_configure('hl_ok', background='#d4edda', foreground='#155724')
         self.name_box.tag_configure('hl_fail', background='#f8d7da', foreground='#721c24')
 
-        # ---------- 卡片③ 输出与归档 ----------
-        card3 = ttk.Labelframe(left, text='输出与归档', style='TLabelframe')
+        # ---------- 卡片③ 输出（精简版）/ 输出与归档（完整版）----------
+        card3 = ttk.Labelframe(left, text=('输出' if LITE else '输出与归档'), style='TLabelframe')
         card3.pack(fill='x', padx=0, pady=(0, self.PAD_CARD))
 
-        # 分组 A: 保存位置(常用, 默认展开)
-        secA = self._fold_section(card3, '保存位置', opened=True)
-        ttk.Label(secA, text='输出目录 (成片先存这里)').pack(anchor='w', padx=self.PAD_X, pady=(6, 2))
-        row = ttk.Frame(secA); row.pack(fill='x', padx=self.PAD_X)
-        self.outdir_var = tk.StringVar(value=DEFAULT_OUTDIR)
-        ttk.Entry(row, textvariable=self.outdir_var).pack(side='left', fill='x', expand=True, padx=(0, 5))
-        ttk.Button(row, text='浏览', command=self.pick_dir).pack(side='left')
-        ttk.Label(secA, text='最终位置根目录').pack(anchor='w', padx=self.PAD_X, pady=(8, 2))
-        self._hint(secA, '填了则按剧名自动匹配项目文件夹, 成片剪切到 项目\\人名条\\',
-                   padx=self.PAD_X, pady=(0, 3))
-        fin_row = ttk.Frame(secA); fin_row.pack(fill='x', padx=self.PAD_X, pady=(0, 8))
-        self.final_root_var = tk.StringVar()
-        ttk.Entry(fin_row, textvariable=self.final_root_var).pack(side='left', fill='x', expand=True, padx=(0, 5))
-        ttk.Button(fin_row, text='浏览', command=self.pick_final_root).pack(side='left', padx=(0, 3))
-        ttk.Button(fin_row, text='清除', command=lambda: self.final_root_var.set('')).pack(side='left')
+        if LITE:
+            # === 精简版: 只要一个输出目录, 不做任何归档 ===
+            ttk.Label(card3, text='输出目录 (成片保存位置)').pack(
+                anchor='w', padx=self.PAD_X, pady=(10, 2))
+            row = ttk.Frame(card3); row.pack(fill='x', padx=self.PAD_X)
+            self.outdir_var = tk.StringVar(value=DEFAULT_OUTDIR)
+            ttk.Entry(row, textvariable=self.outdir_var).pack(
+                side='left', fill='x', expand=True, padx=(0, 5))
+            ttk.Button(row, text='浏览', command=self.pick_dir).pack(side='left')
+            self._hint(card3, '成片按名字命名后直接存到这里，不会自动归档到其它位置',
+                       padx=self.PAD_X, pady=(2, 10))
+            # 精简版不存在的控件用占位变量, 保证其余代码不因缺属性报错
+            self.final_root_var = tk.StringVar(value='')
+            self.final_title_var = tk.StringVar(value='')
+            self.final_subdir_var = tk.StringVar(value=FINAL_SUBDIR)
+            self.conflict_var = tk.StringVar(value=DEFAULT_CONFLICT_LABEL)
+            self.final_move_var = tk.BooleanVar(value=True)
+            self.final_title_entry = None
+        else:
+            self._build_archive_sections(card3)
 
-        # 分组 B: 归档规则(默认展开, 导入CSV后会用到剧名/同名处理)
-        secB = self._fold_section(card3, '归档规则', opened=True)
-        ttk.Label(secB, text='剧名 (匹配项目文件夹)').pack(anchor='w', padx=self.PAD_X, pady=(6, 2))
-        fin_row2 = ttk.Frame(secB); fin_row2.pack(fill='x', padx=self.PAD_X)
-        self.final_title_var = tk.StringVar()
-        self.final_title_entry = ttk.Entry(fin_row2, textvariable=self.final_title_var)
-        self.final_title_entry.pack(side='left', fill='x', expand=True, padx=(0, 8))
-        # 用户手改剧名 -> 取消自动标记, 后续导入不再覆盖(尊重手填)
-        self.final_title_entry.bind('<KeyRelease>', lambda e: self._on_title_typed())
-        self.final_title_entry.bind('<<Paste>>', lambda e: self._on_title_typed())
-        ttk.Label(fin_row2, text='子文件夹').pack(side='left')
-        self.final_subdir_var = tk.StringVar(value=FINAL_SUBDIR)
-        ttk.Entry(fin_row2, textvariable=self.final_subdir_var, width=10).pack(side='left', padx=(3, 8))
-        ttk.Button(fin_row2, text='匹配预览', command=self.preview_final_match).pack(side='left')
-        self._hint(secB, '导入CSV时自动用文件名填剧名; “匹配预览”先看会送到哪个项目',
-                   padx=self.PAD_X, pady=(2, 4))
-        fin_row3 = ttk.Frame(secB); fin_row3.pack(fill='x', padx=self.PAD_X, pady=(0, 4))
-        ttk.Label(fin_row3, text='同名处理').pack(side='left')
-        self.conflict_var = tk.StringVar(value=DEFAULT_CONFLICT_LABEL)
-        ttk.Combobox(fin_row3, textvariable=self.conflict_var, values=list(CONFLICT_LABELS),
-                     state='readonly', width=8).pack(side='left', padx=(3, 10))
-        ttk.Label(fin_row3, text='最终目录已有同名文件时', foreground=self.C_HINT).pack(side='left')
-        self.final_move_var = tk.BooleanVar(value=True)
-        self._cbtn(secB, '剪切(不勾=只复制到最终位置)', self.final_move_var, padx=self.PAD_X, pady=(0, 4))
-        self._hint(secB, '投送时机: 全部导出完成后统一剪切; 输出目录里的其它文件不会被搬',
-                   padx=self.PAD_X, pady=(0, 8))
-
-        # 分组 C: 高级选项(默认折叠)
+        # ---------- 分组 C: 高级选项(两版共用, 默认折叠) ----------
         secC = self._fold_section(card3, '高级选项', opened=False)
-        ttk.Label(secC, text='项目名 (选填)').pack(anchor='w', padx=self.PAD_X, pady=(6, 2))
-        self._hint(secC, '填了则成片先归到 输出目录/项目名_日期/', padx=self.PAD_X, pady=(0, 3))
-        proj_row = ttk.Frame(secC); proj_row.pack(fill='x', padx=self.PAD_X, pady=(0, 4))
-        self.project_var = tk.StringVar()
-        ttk.Entry(proj_row, textvariable=self.project_var).pack(side='left', fill='x', expand=True, padx=(0, 5))
-        ttk.Label(proj_row, text='如: 项目A_2026', foreground=self.C_HINT).pack(side='left')
+        if not LITE:
+            # 项目名会让成片落到 输出目录/项目名_日期/ 子目录, 属于归档行为,
+            # 精简版不提供(用户要求“就输出到输出目录”)。
+            ttk.Label(secC, text='项目名 (选填)').pack(anchor='w', padx=self.PAD_X, pady=(6, 2))
+            self._hint(secC, '填了则成片先归到 输出目录/项目名_日期/', padx=self.PAD_X, pady=(0, 3))
+            proj_row = ttk.Frame(secC); proj_row.pack(fill='x', padx=self.PAD_X, pady=(0, 4))
+            self.project_var = tk.StringVar()
+            ttk.Entry(proj_row, textvariable=self.project_var).pack(
+                side='left', fill='x', expand=True, padx=(0, 5))
+            ttk.Label(proj_row, text='如: 项目A_2026', foreground=self.C_HINT).pack(side='left')
+        else:
+            self.project_var = tk.StringVar(value='')   # 占位, 保证不建子目录
 
         set_row = ttk.Frame(secC); set_row.pack(fill='x', padx=self.PAD_X, pady=(2, 4))
         ttk.Label(set_row, text='分辨率').pack(side='left')
@@ -1899,13 +1968,15 @@ class App:
             messagebox.showerror('导入失败', str(ex))
 
     def _run_match_preview_async(self):
-        """导入后自动弹匹配预览。
+        """导入后自动弹匹配预览（仅完整版）。
 
         用 after 延后一拍再弹: 导入时刚 set 完名字框/剧名, 立即开模态窗会在
-        事件队列里抢先, 导致界面状态还没刷新完弹窗就出来了。
-        未填写最终位置根目录时静默略过(不是每个人都有归档需求)。
+        事件队列里抢光, 导致界面状态还没刷新完弹窗就出来了。
+        精简版没有归档概念, 直接不弹。
         """
         try:
+            if LITE:
+                return
             if not self.final_root_var.get().strip():
                 self._log('（未设置最终位置根目录，跳过自动匹配预览）')
                 return
